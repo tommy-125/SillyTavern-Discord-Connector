@@ -12,6 +12,7 @@
 "use strict";
 
 const { t } = require("./i18n");
+const { sanitizeModelOutput } = require("./output-sanitizer");
 
 async function handleBridgePacket(data, deps) {
   const {
@@ -135,10 +136,12 @@ async function handleBridgePacket(data, deps) {
 
     case "stream_chunk": {
       const streamId = data.streamId || conversationId;
+      const text = sanitizeModelOutput(data.text);
+      if (!text) break;
       streamReceived.add(conversationId);
       await fanout(conversationId, "streamChunk", {
         streamId,
-        text: data.text || "",
+        text,
         characterName: data.characterName || null,
       });
       break;
@@ -150,7 +153,8 @@ async function handleBridgePacket(data, deps) {
       // (the last streamed token) when the chat array hasn't flushed yet.
       // Converting null to "" here would cause "" != null to be true inside
       // streamEnd, bypassing the pendingText fallback and losing the message.
-      const finalText = data.finalText ?? null;
+      const finalText =
+        data.finalText == null ? null : sanitizeModelOutput(data.finalText);
 
       const streamPayload = {
         streamId,
@@ -193,10 +197,12 @@ async function handleBridgePacket(data, deps) {
 
       const messages =
         data?.messages || (data?.text ? [{ name: "", text: data.text }] : []);
-      for (const msg of messages.filter((m) => m?.text?.trim())) {
+      for (const msg of messages) {
+        const cleanText = sanitizeModelOutput(msg?.text);
+        if (!cleanText) continue;
         const text = msg.name
-          ? `**${msg.name}**\n${msg.text.trim()}`
-          : msg.text.trim();
+          ? `**${msg.name}**\n${cleanText}`
+          : cleanText;
         await fanout(conversationId, "sendText", text);
       }
       break;

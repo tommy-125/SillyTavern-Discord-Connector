@@ -40,7 +40,34 @@ test("createConfig applies timeout defaults and derived millisecond fields", () 
   assert.equal(config.queueTaskTimeoutMs, 30000);
   assert.equal(config.imagePlaceholderTimeoutSeconds, 180);
   assert.equal(config.imagePlaceholderTimeoutMs, 180000);
+  assert.equal(config.streamResponses, false);
+  assert.equal(config.dialogueOnlyResponses, false);
   assert.deepEqual(warnings, []);
+});
+
+test("createConfig validates dialogue-only mode", () => {
+  assert.equal(
+    createConfig({ discordToken: "token", dialogueOnlyResponses: true }).config
+      .dialogueOnlyResponses,
+    true,
+  );
+  assert.throws(
+    () =>
+      createConfig({
+        discordToken: "token",
+        dialogueOnlyResponses: "yes",
+      }),
+    /dialogueOnlyResponses must be true or false/,
+  );
+  assert.throws(
+    () =>
+      createConfig({
+        discordToken: "token",
+        dialogueOnlyResponses: true,
+        streamResponses: true,
+      }),
+    /requires streamResponses: false/,
+  );
 });
 
 test("createConfig defaults wssPort to 2333 and rejects invalid values", () => {

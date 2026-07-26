@@ -39,12 +39,16 @@ setGlobalDispatcher(
 // runaway loops from spamming Discord or exhausting system resources.
 // ---------------------------------------------------------------------------
 
-const RESTART_PROTECTION_FILE = path.join(__dirname, ".restart_protection");
+const STATE_DIR = process.env.CONNECTOR_DATA_DIR
+  ? path.resolve(process.env.CONNECTOR_DATA_DIR)
+  : __dirname;
+const RESTART_PROTECTION_FILE = path.join(STATE_DIR, ".restart_protection");
 const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 60_000;
 
 (function checkRestartProtection() {
   try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
     let data = { restarts: [] };
     if (fs.existsSync(RESTART_PROTECTION_FILE)) {
       data = JSON.parse(fs.readFileSync(RESTART_PROTECTION_FILE, "utf8"));

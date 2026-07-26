@@ -37,6 +37,9 @@ If this extension adds value to your roleplay experience, please consider:
 
 ## Quick Start
 
+For a 24/7 container deployment with the official SillyTavern image and a
+headless browser worker, see **[Docker Compose deployment](DEPLOYMENT.md)**.
+
 *Note for Mobile/Android Users: You only need to perform these steps on the computer running your SillyTavern server. Once the bridge is running, you can chat from your phone using the standard Discord app.*
 
 **Don't worry about all the scary instructions. If you follow them step by step, you should be able to get started in a few minutes.**

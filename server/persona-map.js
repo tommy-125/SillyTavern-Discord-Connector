@@ -26,7 +26,20 @@
 const path = require("path");
 const fs = require("fs");
 
-const DEFAULT_MAP_FILE = path.join(__dirname, "persona-map.json");
+const DEFAULT_DATA_DIR = process.env.CONNECTOR_DATA_DIR
+  ? path.resolve(process.env.CONNECTOR_DATA_DIR)
+  : __dirname;
+const DEFAULT_MAP_FILE = path.join(DEFAULT_DATA_DIR, "persona-map.json");
+
+function normalizePersonaDisplayName(displayName, userId) {
+  const cleaned = String(displayName || "")
+    .replace(/[\u0000-\u001f\u007f|\\"]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 64);
+  const suffix = String(userId || "").slice(-6) || "unknown";
+  return cleaned || `Discord User ${suffix}`;
+}
 
 function createPersonaMapStore(options = {}) {
   const filePath = options.filePath || DEFAULT_MAP_FILE;
@@ -94,6 +107,53 @@ function createPersonaMapStore(options = {}) {
     return cfg[platform + "PersonaMap"]?.[userId] ?? null;
   }
 
+  function findUserForPersona(platform, personaName) {
+    if (!personaName) return null;
+
+    const target = String(personaName).toLocaleLowerCase();
+    const cfg = getConfig();
+    const merged = {
+      ...(cfg[platform + "PersonaMap"] || {}),
+      ...(runtimeMap[platform] || {}),
+    };
+
+    for (const [mappedUserId, mappedPersona] of Object.entries(merged)) {
+      if (
+        typeof mappedPersona === "string" &&
+        mappedPersona.toLocaleLowerCase() === target
+      ) {
+        return mappedUserId;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Creates and persists a mapping for a previously unseen platform user.
+   * Display-name collisions receive a stable Discord-ID suffix.
+   *
+   * @returns {{personaName: string, mappingCreated: boolean}}
+   */
+  function ensurePersonaForUser(platform, userId, displayName) {
+    const existing = getPersonaForUser(platform, userId);
+    if (existing) {
+      return { personaName: existing, mappingCreated: false };
+    }
+
+    const baseName = normalizePersonaDisplayName(displayName, userId);
+    let personaName = baseName;
+    const currentOwner = findUserForPersona(platform, personaName);
+
+    if (currentOwner && currentOwner !== userId) {
+      const suffix = String(userId).slice(-6);
+      personaName = `${baseName.slice(0, Math.max(1, 55 - suffix.length))} (${suffix})`;
+    }
+
+    setPersonaForUser(platform, userId, personaName);
+    return { personaName, mappingCreated: true };
+  }
+
   /**
    * Saves or removes a user-persona mapping and writes the updated map to disk.
    *
@@ -125,7 +185,12 @@ function createPersonaMapStore(options = {}) {
     }
   }
 
-  return { load, getPersonaForUser, setPersonaForUser };
+  return {
+    load,
+    getPersonaForUser,
+    ensurePersonaForUser,
+    setPersonaForUser,
+  };
 }
 
 // Default singleton used by the rest of the application.
@@ -142,6 +207,8 @@ let _crossPlatformRelay = true;
 module.exports = {
   load: () => defaultStore.load(),
   getPersonaForUser: (p, u) => defaultStore.getPersonaForUser(p, u),
+  ensurePersonaForUser: (p, u, n) =>
+    defaultStore.ensurePersonaForUser(p, u, n),
   setPersonaForUser: (p, u, n) => defaultStore.setPersonaForUser(p, u, n),
   setDefaultPersonaName: (name) => {
     _defaultPersonaName = name || null;
@@ -151,5 +218,6 @@ module.exports = {
     _crossPlatformRelay = val !== false;
   },
   isCrossRelayEnabled: () => _crossPlatformRelay,
+  normalizePersonaDisplayName,
   createPersonaMapStore,
 };

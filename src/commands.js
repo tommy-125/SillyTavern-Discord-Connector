@@ -39,6 +39,7 @@ import {
   setExternalAbortController,
   deleteLastMessage,
   saveChatConditional,
+  setUserName,
 } from '../../../../../script.js';
 
 import { executeSlashCommandsWithOptions } from '../../../../../scripts/slash-commands.js';
@@ -75,6 +76,8 @@ import {
   enqueueAndGenerateImage,
 } from './image-generation.js';
 import { buildLastExchange, buildHistory, scheduleRecap } from './recap.js';
+import { looksLikePromptLeak } from './model-output-guard.mjs';
+import { formatDialogueOnly } from './dialogue-only.mjs';
 
 // String fallback covers older ST versions that don't export this event type.
 const GROUP_WRAPPER_FINISHED =
@@ -231,12 +234,43 @@ export async function handleUserMessage(data) {
   // eslint-disable-next-line no-shadow
   const t = makeT(await getLocaleStrings(data.userLocale));
 
-  // Auto-switch to the user's saved persona before injecting their message.
+  // Auto-create a missing Discord persona when requested by the bridge, then
+  // switch to it before injecting the user's message.
   if (data.mappedPersona) {
     try {
-      await executeSlashCommandsWithOptions(
-        `/persona-set ${sanitizeSlashArg(data.mappedPersona)}`,
+      const personaName = sanitizeSlashArg(data.mappedPersona);
+      const personas = Object.values(
+        SillyTavern.getContext().powerUserSettings?.personas ?? {},
       );
+      const personaExists = personas.some(
+        (name) =>
+          String(name).localeCompare(personaName, undefined, {
+            sensitivity: 'accent',
+          }) === 0,
+      );
+
+      if (data.ensurePersona && !personaExists) {
+        const safeName = personaName.replace(/["\\]/g, '').slice(0, 64);
+        await executeSlashCommandsWithOptions(
+          `/persona-create name="${safeName}" select=true`,
+        );
+      } else {
+        await executeSlashCommandsWithOptions(`/persona-set ${personaName}`);
+      }
+
+      // The Persona is the stable Discord-ID identity. Keep its stored name
+      // unchanged, but use the sender's current server nickname as {{user}}
+      // for this and subsequent messages until the next sender is selected.
+      if (data.displayName) {
+        const displayName = String(data.displayName)
+          .replace(/[\u0000-\u001f\u007f]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 64);
+        if (displayName) {
+          setUserName(displayName, { toastPersonaNameChange: false });
+        }
+      }
     } catch (err) {
       console.warn(
         `[Discord Bridge] Failed to auto-switch persona to "${data.mappedPersona}":`,
@@ -274,7 +308,9 @@ export async function handleUserMessage(data) {
       text: cumulativeText,
     });
   };
-  eventSource.on(event_types.STREAM_TOKEN_RECEIVED, streamCallback);
+  if (sharedState.streamResponses) {
+    eventSource.on(event_types.STREAM_TOKEN_RECEIVED, streamCallback);
+  }
 
   const sendStreamEnd = () => {
     if (messageState.isStreaming && currentStreamId) {
@@ -327,18 +363,84 @@ export async function handleUserMessage(data) {
   // since the last user turn, then sends them as a single ai_reply payload.
   // Also forwards any images embedded in the last AI message (post-generation
   // art, etc.). Not awaited so text replies reach Discord first.
-  const collectAndSendReplies = () => {
-    if (!messageState.chatId) return;
-    const { chat } = SillyTavern.getContext();
-    if (!chat || chat.length < 2) return;
+  const getTrailingAiMessages = () => {
+    const { chat, groupId } = SillyTavern.getContext();
+    if (!chat || chat.length < 2) return [];
 
     const aiMessages = [];
     for (let i = chat.length - 1; i >= 0; i--) {
       const msg = chat[i];
       if (msg.is_user) break;
       if (msg.mes?.trim())
-        aiMessages.unshift({ name: msg.name || '', text: msg.mes.trim() });
+        aiMessages.unshift({
+          // Character labels are useful in ST group chats, but redundant in a
+          // solo Discord bot conversation where the bot author is already shown.
+          name: groupId ? msg.name || '' : '',
+          text: msg.mes.trim(),
+        });
     }
+    return aiMessages;
+  };
+
+  const getActiveInstructionText = () => {
+    const context = SillyTavern.getContext();
+    const character = context.characters?.[context.characterId];
+    return [
+      character?.data?.system_prompt || character?.system_prompt || '',
+      character?.data?.post_history_instructions ||
+        character?.post_history_instructions ||
+        '',
+    ].join('\n');
+  };
+
+  const formatTrailingAiMessages = async () => {
+    if (!sharedState.dialogueOnlyResponses) return;
+
+    const { chat } = SillyTavern.getContext();
+    if (!chat?.length) return;
+
+    let changed = false;
+    for (let i = chat.length - 1; i >= 0; i--) {
+      const msg = chat[i];
+      if (msg.is_user) break;
+
+      const original = String(msg.mes ?? '');
+      const formatted = formatDialogueOnly(original);
+      if (formatted === original.trim()) continue;
+
+      msg.mes = formatted;
+      if (Array.isArray(msg.swipes) && msg.swipes.length > 0) {
+        const swipeIndex = Number.isInteger(msg.swipe_id)
+          ? msg.swipe_id
+          : msg.swipes.length - 1;
+        if (swipeIndex >= 0 && swipeIndex < msg.swipes.length) {
+          msg.swipes[swipeIndex] = formatted;
+        }
+      }
+      changed = true;
+    }
+
+    if (changed) await saveChatConditional();
+  };
+
+  const inspectAndFormatSoloReply = async () => {
+    const rawMessages = getTrailingAiMessages();
+    const leakedPrompt = rawMessages.some((message) =>
+      looksLikePromptLeak(message.text, getActiveInstructionText()),
+    );
+    if (leakedPrompt) return { invalid: true, reason: 'prompt instructions' };
+
+    await formatTrailingAiMessages();
+    const formattedMessages = getTrailingAiMessages();
+    return {
+      invalid: formattedMessages.length === 0,
+      reason: 'stage directions without dialogue',
+    };
+  };
+
+  const collectAndSendReplies = () => {
+    if (!messageState.chatId) return;
+    const aiMessages = getTrailingAiMessages();
 
     if (aiMessages.length > 0) {
       safeSend({
@@ -401,10 +503,9 @@ export async function handleUserMessage(data) {
       return;
     }
     sendStreamEnd();
-    if (!SillyTavern.getContext().groupId) {
-      removeAllListeners();
-      collectAndSendReplies();
-    }
+    // Solo replies are finalized after Generate() resolves. This gives the
+    // final-only path a chance to reject a prompt replay and retry it without
+    // ever forwarding the bad text to Discord.
   };
   eventSource.on(event_types.GENERATION_ENDED, onGenerationEnded);
 
@@ -430,6 +531,30 @@ export async function handleUserMessage(data) {
     const abortController = new AbortController();
     setExternalAbortController(abortController);
     await Generate('normal', { signal: abortController.signal });
+
+    if (!SillyTavern.getContext().groupId) {
+      let inspection = await inspectAndFormatSoloReply();
+
+      if (inspection.invalid && !sharedState.streamResponses) {
+        console.warn(
+          `[Discord Bridge] Invalid final reply (${inspection.reason}); retrying once.`,
+        );
+        await deleteLastMessage();
+        safeSend({ type: 'typing_action', chatId: messageState.chatId });
+        await Generate('normal', { signal: abortController.signal });
+        inspection = await inspectAndFormatSoloReply();
+
+        if (inspection.invalid) {
+          console.warn(
+            `[Discord Bridge] Retry also produced an invalid reply (${inspection.reason}); suppressing it.`,
+          );
+          await deleteLastMessage();
+        }
+      }
+
+      removeAllListeners();
+      collectAndSendReplies();
+    }
   } catch (error) {
     console.error('[Discord Bridge] Generation error:', error);
     await deleteLastMessage();

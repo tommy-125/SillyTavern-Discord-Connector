@@ -42,6 +42,7 @@ const { t, makeTranslator } = require('./i18n');
 const { client } = require('./client');
 const { sendLong, sendImagesToChannel } = require('./messaging');
 const { splitLongText } = require('./text-chunking');
+const { prepareIncomingContent } = require('./message-trigger');
 const { enqueue } = require('./queue');
 const {
   addRoute,
@@ -53,6 +54,8 @@ const {
 const { streamSessions, scheduleEdit } = require('./streaming');
 const {
   getPersonaForUser,
+  ensurePersonaForUser,
+  normalizePersonaDisplayName,
   getDefaultPersonaName,
   isCrossRelayEnabled,
 } = require('./persona-map');
@@ -688,17 +691,34 @@ if (DISCORD_PLUGIN_ENABLED) {
     )
       return;
 
-    let content = message.content;
+    const botUserId = client.user?.id || null;
+    const isBotMentioned = Boolean(
+      botUserId && message.mentions?.users?.has(botUserId),
+    );
+    const prepared = prepareIncomingContent({
+      content: message.content,
+      triggerPrefix: config.triggerPrefix,
+      botUserId,
+      isBotMentioned,
+    });
+    if (!prepared.accepted) return;
+
+    let content = prepared.content;
     let shouldTrackForDelete = !config.triggerPrefix;
 
     if (config.triggerPrefix) {
-      if (!content.startsWith(config.triggerPrefix)) return;
-      content = content.slice(config.triggerPrefix.length).trimStart();
       shouldTrackForDelete = true;
     }
 
-    if (content.startsWith('/')) {
-      const [command, ...args] = content.slice(1).split(' ');
+    // Preserve the textual trigger in ordinary roleplay prompts, but ignore it
+    // while recognizing legacy text commands such as "小黑 /newchat".
+    const commandContent =
+      config.triggerPrefix && content.startsWith(config.triggerPrefix)
+        ? content.slice(config.triggerPrefix.length).trimStart()
+        : content;
+
+    if (commandContent.startsWith('/')) {
+      const [command, ...args] = commandContent.slice(1).split(' ');
       const cappedArgs =
         command === 'delete' && config.triggerPrefix
           ? [String(Math.min(1, parseInt(args[0]) || 1))]
@@ -721,7 +741,27 @@ if (DISCORD_PLUGIN_ENABLED) {
 
     const conversationId = resolveConversationId('discord', message.channel.id);
     addRoute(conversationId, 'discord', message.channel.id);
-    const mappedPersona = getPersonaForUser('discord', message.author.id);
+    const displayName = normalizePersonaDisplayName(
+      message.member?.displayName ||
+        message.author.globalName ||
+        message.author.username,
+      message.author.id,
+    );
+    let mappedPersona = getPersonaForUser('discord', message.author.id);
+    if (!mappedPersona && config.autoCreateDiscordPersonas === true) {
+      const result = ensurePersonaForUser(
+        'discord',
+        message.author.id,
+        displayName,
+      );
+      mappedPersona = result.personaName;
+      if (result.mappingCreated) {
+        log(
+          'log',
+          `[PersonaMap] Auto-mapped Discord user ${message.author.id} to "${mappedPersona}"`,
+        );
+      }
+    }
     const userLocale = getLangForUser('discord', message.author.id) || null;
     stClient.send(
       JSON.stringify({
@@ -731,6 +771,10 @@ if (DISCORD_PLUGIN_ENABLED) {
         userId: message.author.id,
         platform: 'discord',
         ...(mappedPersona ? { mappedPersona } : {}),
+        ...(mappedPersona ? { displayName } : {}),
+        ...(mappedPersona && config.autoCreateDiscordPersonas === true
+          ? { ensurePersona: true }
+          : {}),
         ...(userLocale ? { userLocale } : {}),
       }),
     );

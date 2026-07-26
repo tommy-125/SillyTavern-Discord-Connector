@@ -1,0 +1,119 @@
+name: sillytavern-discord
+
+services:
+  character-seed:
+    image: alpine:3.23
+    container_name: sillytavern-character-seed
+    restart: "no"
+    environment:
+      ST_CHARACTER_FILE_NAME: ${ST_CHARACTER_FILE_NAME:-Kuro.png}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        target="/data/default-user/characters/$${ST_CHARACTER_FILE_NAME}"
+        mkdir -p "$$(dirname "$${target}")"
+        if [ ! -f "$${target}" ] || ! cmp -s /seed/character.png "$${target}"; then
+          cp /seed/character.png "$${target}"
+          chmod 0644 "$${target}"
+          echo "Synchronized character card: $${target}"
+        else
+          echo "Character card is already current: $${target}"
+        fi
+    volumes:
+      - type: bind
+        source: ${ST_CHARACTER_CARD_PATH:-../kuro-character/Kuro-character-card-gpt-5.6-sol/Kuro_chara_card.discord.png}
+        target: /seed/character.png
+        read_only: true
+      - ./runtime/sillytavern/data:/data
+
+  sillytavern:
+    build:
+      context: .
+      dockerfile: deploy/sillytavern/Dockerfile
+      args:
+        SILLYTAVERN_VERSION: ${SILLYTAVERN_VERSION:-1.18.0}
+    image: ${SILLYTAVERN_IMAGE:-local/sillytavern-discord}:${SILLYTAVERN_VERSION:-1.18.0}
+    container_name: sillytavern
+    restart: unless-stopped
+    depends_on:
+      character-seed:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      FORCE_COLOR: "1"
+      SILLYTAVERN_HEARTBEATINTERVAL: "30"
+      TZ: ${TZ:-Asia/Taipei}
+      SILLYTAVERN_LISTEN: "true"
+      SILLYTAVERN_BROWSERLAUNCH_ENABLED: "false"
+      # Permit loopback and private container networks. The host port remains
+      # loopback-only, while ST's own security check stays enabled.
+      SILLYTAVERN_WHITELISTMODE: "true"
+      SILLYTAVERN_WHITELIST: '["::1","127.0.0.1","10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"]'
+      SILLYTAVERN_PRIVATEADDRESSWHITELIST_ENABLED: "true"
+      SILLYTAVERN_BASICAUTHMODE: ${ST_BASIC_AUTH_ENABLED:-false}
+      SILLYTAVERN_BASICAUTHUSER_USERNAME: ${ST_BASIC_AUTH_USERNAME:-}
+      SILLYTAVERN_BASICAUTHUSER_PASSWORD: ${ST_BASIC_AUTH_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${SILLYTAVERN_PORT:-8000}:8000"
+    volumes:
+      - ./runtime/sillytavern/config:/home/node/app/config
+      - ./runtime/sillytavern/data:/home/node/app/data
+      - ./runtime/sillytavern/plugins:/home/node/app/plugins
+    healthcheck:
+      test: ["CMD", "node", "src/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+
+  discord-bridge:
+    build:
+      context: .
+      dockerfile: deploy/bridge/Dockerfile
+    image: ${BRIDGE_IMAGE:-local/sillytavern-discord-bridge}:1.8.3
+    container_name: discord-bridge
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      CONNECTOR_DATA_DIR: /data
+    expose:
+      - "2333"
+    volumes:
+      - type: bind
+        source: ./server/config.js
+        target: /app/config.js
+        read_only: true
+      - ./runtime/bridge:/data
+
+  browser-worker:
+    build:
+      context: .
+      dockerfile: deploy/browser/Dockerfile
+    image: ${BROWSER_IMAGE:-local/sillytavern-browser-worker}:1.0.0
+    container_name: sillytavern-browser-worker
+    restart: unless-stopped
+    init: true
+    depends_on:
+      sillytavern:
+        condition: service_healthy
+      discord-bridge:
+        condition: service_started
+    environment:
+      SILLYTAVERN_URL: http://sillytavern:8000
+      CONNECTOR_BRIDGE_URL: ws://discord-bridge:2333
+      ST_BASIC_AUTH_USERNAME: ${ST_BASIC_AUTH_USERNAME:-}
+      ST_BASIC_AUTH_PASSWORD: ${ST_BASIC_AUTH_PASSWORD:-}
+      CONNECTOR_UI_TIMEOUT_MS: ${CONNECTOR_UI_TIMEOUT_MS:-120000}
+      CONNECTOR_WATCH_INTERVAL_MS: ${CONNECTOR_WATCH_INTERVAL_MS:-15000}
+      CONNECTOR_PROMPT_SNAPSHOT_PATH: ${CONNECTOR_PROMPT_SNAPSHOT_PATH:-}
+      CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE: ${CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ST_DEFAULT_CHARACTER: ${ST_DEFAULT_CHARACTER:-Kuro}
+      ST_DEFAULT_PERSONA: ${ST_DEFAULT_PERSONA:-User}
+      ST_UI_LANGUAGE: ${ST_UI_LANGUAGE:-en}
+      TZ: ${TZ:-Asia/Taipei}
+    shm_size: 1gb
+    volumes:
+      - ./runtime/browser/profile:/data/profile

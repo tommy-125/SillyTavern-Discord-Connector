@@ -33,6 +33,8 @@ function createConfig(rawConfig) {
     wssPort: 2333,
     queueTaskTimeoutSeconds: 30,
     imagePlaceholderTimeoutSeconds: 180,
+    streamResponses: false,
+    dialogueOnlyResponses: false,
     ...rawConfig,
   };
 
@@ -104,6 +106,15 @@ function createConfig(rawConfig) {
   ) {
     throw new Error(
       "config.imagePlaceholderTimeoutSeconds must be a positive number (e.g. 180 for 3 minutes).",
+    );
+  }
+
+  if (typeof config.dialogueOnlyResponses !== "boolean") {
+    throw new Error("config.dialogueOnlyResponses must be true or false.");
+  }
+  if (config.dialogueOnlyResponses && config.streamResponses) {
+    throw new Error(
+      "config.dialogueOnlyResponses requires streamResponses: false.",
     );
   }
 

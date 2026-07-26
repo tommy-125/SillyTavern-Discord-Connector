@@ -1,0 +1,17 @@
+{
+  "name": "sillytavern-connector-browser-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Keeps the SillyTavern Discord Connector running in headless Chromium.",
+  "main": "runner.js",
+  "scripts": {
+    "start": "node runner.js",
+    "check": "node --check runner.js"
+  },
+  "dependencies": {
+    "playwright": "1.61.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

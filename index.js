@@ -20,13 +20,12 @@
  * server (server.js) over WebSocket and acts as the intermediary between
  * Discord and SillyTavern's internals.
  *
- * Streaming:
- *   Each character turn gets a unique streamId at GENERATION_STARTED.
- *   STREAM_TOKEN_RECEIVED forwards cumulative text to the bridge for throttled
- *   Discord edits. GENERATION_ENDED sends stream_end, which tells the bridge to
- *   replace the live-edit message with a clean final post. Group chats include
- *   the character name; solo chats do not. All per-message listeners are
- *   registered and cleaned up inside handleUserMessage to prevent leaks.
+ * Responses:
+ *   Final-only delivery is the default: Discord receives one completed reply
+ *   after GENERATION_ENDED. Optional streaming can be enabled by bridge config;
+ *   it forwards cumulative text for throttled Discord edits. All SillyTavern
+ *   generations and state-mutating commands run through one global FIFO queue
+ *   because the frontend has a single active chat and character state.
  *
  * Image relay:
  *   Local ST images (thumbnails, generated art, avatars) are fetched here in
@@ -82,6 +81,7 @@ import {
   handleExecuteCommand,
   handleGetAutocomplete,
 } from "./src/commands.js";
+import { enqueueGenerationTask } from "./src/generation-queue.mjs";
 
 // ---------------------------------------------------------------------------
 // Connection state (WebSocket lifecycle only - all other state is in src/)
@@ -90,6 +90,16 @@ import {
 let shouldReconnect = true;
 let reconnectTimeout = null;
 let heartbeatInterval = null;
+
+/**
+ * Optional per-browser overrides injected before this script loads. Container
+ * browser workers use this to connect over Docker DNS without saving an
+ * unreachable internal URL into the user's normal SillyTavern settings.
+ */
+function getRuntimeConfig() {
+  const config = globalThis.SILLYTAVERN_DISCORD_CONNECTOR_CONFIG;
+  return config && typeof config === "object" ? config : {};
+}
 
 // ---------------------------------------------------------------------------
 // WebSocket connection
@@ -106,7 +116,9 @@ function connect() {
   shouldReconnect = true;
 
   const settings = getSettings();
-  if (!settings.bridgeUrl) {
+  const runtimeConfig = getRuntimeConfig();
+  const bridgeUrl = runtimeConfig.bridgeUrl || settings.bridgeUrl;
+  if (!bridgeUrl) {
     updateStatus(ts("ui.status.urlNotSet"), "red");
     return;
   }
@@ -117,7 +129,7 @@ function connect() {
   }
 
   updateStatus(ts("ui.status.connecting"), "orange");
-  const socket = new WebSocket(settings.bridgeUrl);
+  const socket = new WebSocket(bridgeUrl);
   setWs(socket);
 
   socket.onopen = () => {
@@ -175,6 +187,9 @@ function connect() {
         if (Array.isArray(data.availableLanguages)) {
           sharedState.availableLanguages = data.availableLanguages;
         }
+        sharedState.streamResponses = data.streamResponses === true;
+        sharedState.dialogueOnlyResponses =
+          data.dialogueOnlyResponses === true;
         const hasProPlugin = Object.entries(data.plugins || {}).some(
           ([platform, status]) => platform !== "discord" && status === "active",
         );
@@ -202,7 +217,7 @@ function connect() {
 
       if (data.type === "user_message") {
         $(document).trigger("smart_memory:dismiss_recap");
-        await handleUserMessage(data);
+        await enqueueGenerationTask(() => handleUserMessage(data));
         return;
       }
 
@@ -218,7 +233,7 @@ function connect() {
       }
 
       if (data.type === "execute_command") {
-        await handleExecuteCommand(data);
+        await enqueueGenerationTask(() => handleExecuteCommand(data));
         return;
       }
     } catch (error) {
@@ -244,7 +259,9 @@ function connect() {
     }
 
     const settings = getSettings();
-    if (settings.autoConnect && shouldReconnect) {
+    const runtimeConfig = getRuntimeConfig();
+    const autoConnect = runtimeConfig.autoConnect ?? settings.autoConnect;
+    if (autoConnect && shouldReconnect) {
       updateStatus(ts("ui.status.reconnecting"), "orange");
       if (!reconnectTimeout) {
         reconnectTimeout = setTimeout(() => {
@@ -299,8 +316,12 @@ jQuery(async () => {
     $("#extensions_settings").append($settings);
 
     const settings = getSettings();
-    $("#discord_bridge_url").val(settings.bridgeUrl);
-    $("#discord_auto_connect").prop("checked", settings.autoConnect);
+    const runtimeConfig = getRuntimeConfig();
+    $("#discord_bridge_url").val(runtimeConfig.bridgeUrl || settings.bridgeUrl);
+    $("#discord_auto_connect").prop(
+      "checked",
+      runtimeConfig.autoConnect ?? settings.autoConnect,
+    );
     $("#discord_expression_mode").val(settings.expressionMode);
     $("#discord_allow_user_persona_save").prop(
       "checked",
@@ -417,7 +438,7 @@ jQuery(async () => {
       if (tipTarget && !$(e.target).closest(".dc-info").length) hideTip();
     });
 
-    if (settings.autoConnect) connect();
+    if (runtimeConfig.autoConnect ?? settings.autoConnect) connect();
   } catch (error) {
     console.error("[Discord Bridge] Failed to load settings UI:", error);
   }

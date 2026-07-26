@@ -151,6 +151,58 @@ test("handleBridgePacket ai_reply is skipped once after stream_end", async () =>
   assert.equal(deps.streamHandled.has("conv1"), false);
 });
 
+test("handleBridgePacket removes leaked DeepSeek markers from ai_reply", async () => {
+  const deps = createDeps();
+
+  await handleBridgePacket(
+    {
+      type: "ai_reply",
+      chatId: "conv1",
+      text: "……早安。<｜end▁of▁sentence｜>",
+    },
+    deps,
+  );
+
+  const sends = deps.__calls.filter((c) => c[1] === "sendText");
+  assert.equal(sends.length, 2);
+  assert.ok(sends.every((c) => c[3] === "……早安。"));
+});
+
+test("handleBridgePacket drops marker-only ai_reply", async () => {
+  const deps = createDeps();
+
+  await handleBridgePacket(
+    {
+      type: "ai_reply",
+      chatId: "conv1",
+      text: "<｜end▁of▁sentence｜>",
+    },
+    deps,
+  );
+
+  assert.equal(deps.__calls.filter((c) => c[1] === "sendText").length, 0);
+});
+
+test("handleBridgePacket removes leaked DeepSeek markers from stream chunks", async () => {
+  const deps = createDeps();
+  const payloads = [];
+  deps.fanout = async (_conv, fnName, payload) => {
+    if (fnName === "streamChunk") payloads.push(payload);
+    return [];
+  };
+
+  await handleBridgePacket(
+    {
+      type: "stream_chunk",
+      chatId: "conv1",
+      text: "你好<｜end▁of▁sentence｜>",
+    },
+    deps,
+  );
+
+  assert.equal(payloads[0].text, "你好");
+});
+
 test("handleBridgePacket save_user_persona calls setPersonaForUser via deps", async () => {
   const deps = createDeps();
   await handleBridgePacket(

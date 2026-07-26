@@ -17,7 +17,10 @@ const assert = require("node:assert/strict");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
-const { createPersonaMapStore } = require("./persona-map");
+const {
+  createPersonaMapStore,
+  normalizePersonaDisplayName,
+} = require("./persona-map");
 
 function tmpFile() {
   return path.join(
@@ -49,6 +52,64 @@ test("setPersonaForUser and getPersonaForUser round-trip", () => {
   const store = makeStore();
   store.setPersonaForUser("discord", "user1", "Alice");
   assert.equal(store.getPersonaForUser("discord", "user1"), "Alice");
+});
+
+test("ensurePersonaForUser creates a persistent display-name mapping", () => {
+  const store = makeStore();
+  const result = store.ensurePersonaForUser("discord", "123456", "Alice");
+
+  assert.deepEqual(result, {
+    personaName: "Alice",
+    mappingCreated: true,
+  });
+  assert.equal(store.getPersonaForUser("discord", "123456"), "Alice");
+});
+
+test("ensurePersonaForUser preserves an existing explicit mapping", () => {
+  const store = makeStore({
+    discordPersonaMap: { "123456": "Owner Alice" },
+  });
+  const result = store.ensurePersonaForUser(
+    "discord",
+    "123456",
+    "Changed Name",
+  );
+
+  assert.deepEqual(result, {
+    personaName: "Owner Alice",
+    mappingCreated: false,
+  });
+});
+
+test("ensurePersonaForUser disambiguates duplicate display names", () => {
+  const store = makeStore();
+  store.ensurePersonaForUser("discord", "111111", "Alice");
+  const result = store.ensurePersonaForUser("discord", "222222", "Alice");
+
+  assert.equal(result.personaName, "Alice (222222)");
+  assert.equal(store.getPersonaForUser("discord", "222222"), "Alice (222222)");
+});
+
+test("ensurePersonaForUser sanitizes unsafe display names", () => {
+  const store = makeStore();
+  const result = store.ensurePersonaForUser(
+    "discord",
+    "123456",
+    "  Alice | /newchat\n\"quoted\"  ",
+  );
+
+  assert.equal(result.personaName, "Alice /newchat quoted");
+});
+
+test("normalizePersonaDisplayName follows a changed nickname without changing identity", () => {
+  assert.equal(
+    normalizePersonaDisplayName("  New Nickname  ", "123456"),
+    "New Nickname",
+  );
+  assert.equal(
+    normalizePersonaDisplayName("", "123456"),
+    "Discord User 123456",
+  );
 });
 
 test("setPersonaForUser persists across load", () => {

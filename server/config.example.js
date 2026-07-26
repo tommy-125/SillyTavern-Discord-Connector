@@ -66,13 +66,16 @@ module.exports = {
   // Set to true to enable verbose terminal logging for troubleshooting.
   debug: false,
 
-  // When set, the bot only responds to messages that begin with this prefix.
+  // When set, the bot responds to messages that begin with this prefix or
+  // messages that mention the bot directly.
   // Useful for group chats where players talk amongst themselves and only want
   // the bot to respond to prefixed messages (e.g. "! hello" or "！こんにちは").
   // Any non-empty string works, including multi-byte unicode characters.
   // When active, /delete is capped at 1 message to avoid deleting non-prefixed
   // banter that was never tracked by the bot.
-  // Remove or comment out this line entirely to disable the prefix requirement.
+  // Remove or comment out this line entirely to respond to every message in an
+  // allowed channel. The textual prefix is preserved for ST so the character
+  // can see how they were addressed; Discord mention markup is stripped.
   // triggerPrefix: "!",
 
   // =========================================================================
@@ -87,6 +90,14 @@ module.exports = {
   // and showing a timeout message (seconds).
   imagePlaceholderTimeoutSeconds: 180,
 
+  // Live previews repeatedly edit a Discord message while the model streams.
+  // Keep this false to send exactly one complete reply after generation.
+  streamResponses: false,
+
+  // Keep only dialogue spoken by the character. Stage directions are removed
+  // from SillyTavern history before the final reply is sent to Discord.
+  dialogueOnlyResponses: false,
+
   // Map platform user IDs to SillyTavern persona names.
   // When set, the persona switches automatically before each message from that user.
   // Users can also save their own preference with the /mypersona command, which
@@ -98,6 +109,12 @@ module.exports = {
     // "123456789012345678": "Alice",
     // "987654321098765432": "Bob",
   },
+
+  // Automatically create a persistent SillyTavern Persona for an unmapped
+  // Discord user on their first accepted message. The server nickname, global
+  // display name, or username is used and the User ID mapping is saved in
+  // persona-map.json. Existing discordPersonaMap and /mypersona choices win.
+  autoCreateDiscordPersonas: false,
 
   // Telegram: use the numeric user ID (not the @username).
   // You can get it from the bot's getUpdates response (msg.from.id).

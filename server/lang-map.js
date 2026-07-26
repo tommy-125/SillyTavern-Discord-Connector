@@ -26,7 +26,10 @@
 const path = require("path");
 const fs = require("fs");
 
-const DEFAULT_MAP_FILE = path.join(__dirname, "lang-map.json");
+const DEFAULT_DATA_DIR = process.env.CONNECTOR_DATA_DIR
+  ? path.resolve(process.env.CONNECTOR_DATA_DIR)
+  : __dirname;
+const DEFAULT_MAP_FILE = path.join(DEFAULT_DATA_DIR, "lang-map.json");
 
 function createLangMapStore(options = {}) {
   const filePath = options.filePath || DEFAULT_MAP_FILE;

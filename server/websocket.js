@@ -272,6 +272,8 @@ wss.on('connection', (ws) => {
       availableLanguages: AVAILABLE_LANGUAGES,
       plugins: pluginStatus,
       imagePlaceholderTimeoutMs: config.imagePlaceholderTimeoutMs,
+      streamResponses: config.streamResponses === true,
+      dialogueOnlyResponses: config.dialogueOnlyResponses === true,
     }),
   );
 

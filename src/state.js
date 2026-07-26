@@ -29,4 +29,6 @@ export const sharedState = {
   bridgeLocale: null,
   bridgePlugins: null,
   availableLanguages: null,
+  streamResponses: false,
+  dialogueOnlyResponses: false,
 };
