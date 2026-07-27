@@ -766,6 +766,8 @@ if (DISCORD_PLUGIN_ENABLED) {
     stClient.send(
       JSON.stringify({
         type: 'user_message',
+        requestId: message.id,
+        receivedAt: Date.now(),
         text: content,
         chatId: conversationId,
         userId: message.author.id,

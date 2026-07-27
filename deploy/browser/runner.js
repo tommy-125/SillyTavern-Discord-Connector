@@ -20,6 +20,11 @@ const WATCH_INTERVAL_MS = positiveInt(
 const BASIC_AUTH_USERNAME = process.env.ST_BASIC_AUTH_USERNAME || "";
 const BASIC_AUTH_PASSWORD = process.env.ST_BASIC_AUTH_PASSWORD || "";
 const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL || "").trim();
+const OPENROUTER_REASONING_EFFORT = (
+  process.env.OPENROUTER_REASONING_EFFORT || "none"
+)
+  .trim()
+  .toLowerCase();
 const DEFAULT_CHARACTER = (process.env.ST_DEFAULT_CHARACTER || "").trim();
 const DEFAULT_PERSONA = (process.env.ST_DEFAULT_PERSONA || "User").trim();
 const UI_LANGUAGE = (process.env.ST_UI_LANGUAGE || "en").trim();
@@ -69,6 +74,16 @@ async function loadConfiguration() {
   openRouterApiKey = (process.env.OPENROUTER_API_KEY || "").trim();
   if (!openRouterApiKey) {
     throw new Error("OPENROUTER_API_KEY is required; set it in .env");
+  }
+
+  if (
+    !["none", "auto", "min", "low", "medium", "high", "max"].includes(
+      OPENROUTER_REASONING_EFFORT,
+    )
+  ) {
+    throw new Error(
+      "OPENROUTER_REASONING_EFFORT must be none, auto, min, low, medium, high, or max",
+    );
   }
 }
 
@@ -168,6 +183,30 @@ async function configureOpenRouter(page) {
     globalThis.jQuery(select).val(model).trigger("change");
   }, OPENROUTER_MODEL);
 
+  // SillyTavern 1.18 maps "thoughts off + minimum effort" to OpenRouter's
+  // reasoning.effort="none". Keep this deterministic on every container start
+  // so simple roleplay replies do not intermittently spend seconds on hidden
+  // reasoning before any visible text is produced.
+  await page.evaluate((reasoningEffort) => {
+    const thoughts = document.querySelector("#openai_show_thoughts");
+    const effort = document.querySelector("#openai_reasoning_effort");
+    if (!(thoughts instanceof HTMLInputElement)) {
+      throw new Error("SillyTavern reasoning toggle is unavailable");
+    }
+    if (!(effort instanceof HTMLSelectElement)) {
+      throw new Error("SillyTavern reasoning effort selector is unavailable");
+    }
+
+    const disabled = reasoningEffort === "none";
+    const uiEffort = disabled ? "min" : reasoningEffort;
+    if (thoughts.checked === disabled) {
+      globalThis.jQuery(thoughts).prop("checked", !disabled).trigger("input");
+    }
+    if (effort.value !== uiEffort) {
+      globalThis.jQuery(effort).val(uiEffort).trigger("input");
+    }
+  }, OPENROUTER_REASONING_EFFORT);
+
   await page.waitForFunction(
     () => {
       const button = document.querySelector("#api_button_openai");
@@ -199,7 +238,10 @@ async function configureOpenRouter(page) {
     throw new Error("SillyTavern did not connect to OpenRouter in time");
   }
 
-  log("info", `OpenRouter is ready with model ${OPENROUTER_MODEL}`);
+  log(
+    "info",
+    `OpenRouter is ready with model ${OPENROUTER_MODEL}; reasoning ${OPENROUTER_REASONING_EFFORT}`,
+  );
 }
 
 async function selectDefaultCharacter(page) {

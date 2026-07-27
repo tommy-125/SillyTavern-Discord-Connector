@@ -81,7 +81,10 @@ import {
   handleExecuteCommand,
   handleGetAutocomplete,
 } from "./src/commands.js";
-import { enqueueGenerationTask } from "./src/generation-queue.mjs";
+import {
+  enqueueGenerationTask,
+  getGenerationQueueSize,
+} from "./src/generation-queue.mjs";
 
 // ---------------------------------------------------------------------------
 // Connection state (WebSocket lifecycle only - all other state is in src/)
@@ -217,7 +220,18 @@ function connect() {
 
       if (data.type === "user_message") {
         $(document).trigger("smart_memory:dismiss_recap");
-        await enqueueGenerationTask(() => handleUserMessage(data));
+        const queuedAt = performance.now();
+        const pendingAhead = Math.max(0, getGenerationQueueSize());
+        const requestLabel = String(data.requestId || "unknown").slice(-8);
+        console.info(
+          `[Discord Bridge][Latency ${requestLabel}] received by browser; bridge transit ${
+            Number.isFinite(data.receivedAt) ? Date.now() - data.receivedAt : "unknown"
+          } ms; pending ahead ${pendingAhead}`,
+        );
+        await enqueueGenerationTask(() => {
+          data.queueDelayMs = Math.round(performance.now() - queuedAt);
+          return handleUserMessage(data);
+        });
         return;
       }
 

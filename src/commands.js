@@ -227,21 +227,32 @@ export function captureAndSendIntroMessage(chatId) {
  * (normal completion, user stop, error) to prevent leaks across sessions.
  */
 export async function handleUserMessage(data) {
+  const latencyStartedAt = performance.now();
+  const latencyLabel = String(data.requestId || 'unknown').slice(-8);
+  const latencyParts = {};
+  const markLatency = (name, since) => {
+    latencyParts[name] = Math.round(performance.now() - since);
+  };
+
   sharedState.lastActiveChatId = data.chatId || sharedState.lastActiveChatId;
   sharedState.lastActiveUserLocale = data.userLocale ?? null;
 
   // Resolve per-user locale so error messages reach the user in their language.
   // eslint-disable-next-line no-shadow
+  let stageStartedAt = performance.now();
   const t = makeT(await getLocaleStrings(data.userLocale));
+  markLatency('locale', stageStartedAt);
 
   // Auto-create a missing Discord persona when requested by the bridge, then
   // switch to it before injecting the user's message.
   if (data.mappedPersona) {
+    stageStartedAt = performance.now();
     try {
       const personaName = sanitizeSlashArg(data.mappedPersona);
-      const personas = Object.values(
-        SillyTavern.getContext().powerUserSettings?.personas ?? {},
-      );
+      const context = SillyTavern.getContext();
+      const powerUserSettings = context.powerUserSettings;
+      const personaEntries = powerUserSettings?.personas ?? {};
+      const personas = Object.values(personaEntries);
       const personaExists = personas.some(
         (name) =>
           String(name).localeCompare(personaName, undefined, {
@@ -249,12 +260,23 @@ export async function handleUserMessage(data) {
           }) === 0,
       );
 
+      const activePersonaId =
+        powerUserSettings?.persona || powerUserSettings?.default_persona;
+      const activePersonaName = activePersonaId
+        ? personaEntries[activePersonaId]
+        : null;
+      const personaAlreadyActive =
+        typeof activePersonaName === 'string' &&
+        activePersonaName.localeCompare(personaName, undefined, {
+          sensitivity: 'accent',
+        }) === 0;
+
       if (data.ensurePersona && !personaExists) {
         const safeName = personaName.replace(/["\\]/g, '').slice(0, 64);
         await executeSlashCommandsWithOptions(
           `/persona-create name="${safeName}" select=true`,
         );
-      } else {
+      } else if (!personaAlreadyActive) {
         await executeSlashCommandsWithOptions(`/persona-set ${personaName}`);
       }
 
@@ -267,7 +289,7 @@ export async function handleUserMessage(data) {
           .replace(/\s+/g, ' ')
           .trim()
           .slice(0, 64);
-        if (displayName) {
+        if (displayName && SillyTavern.getContext().name1 !== displayName) {
           setUserName(displayName, { toastPersonaNameChange: false });
         }
       }
@@ -277,6 +299,7 @@ export async function handleUserMessage(data) {
         err,
       );
     }
+    markLatency('persona', stageStartedAt);
   }
 
   const messageState = {
@@ -287,7 +310,9 @@ export async function handleUserMessage(data) {
 
   safeSend({ type: 'typing_action', chatId: messageState.chatId });
 
+  stageStartedAt = performance.now();
   await sendMessageAsUser(data.text);
+  markLatency('injectUser', stageStartedAt);
 
   let currentStreamId = null;
   let currentCharacterName = null;
@@ -445,6 +470,8 @@ export async function handleUserMessage(data) {
     if (aiMessages.length > 0) {
       safeSend({
         type: 'ai_reply',
+        requestId: data.requestId,
+        receivedAt: data.receivedAt,
         chatId: messageState.chatId,
         messages: aiMessages,
       });
@@ -454,6 +481,8 @@ export async function handleUserMessage(data) {
       // just means ST hadn't flushed chat[last].mes yet when GENERATION_ENDED fired.
       safeSend({
         type: 'error_message',
+        requestId: data.requestId,
+        receivedAt: data.receivedAt,
         chatId: messageState.chatId,
         text: t('reply.noResponse'),
       });
@@ -530,10 +559,14 @@ export async function handleUserMessage(data) {
   try {
     const abortController = new AbortController();
     setExternalAbortController(abortController);
+    stageStartedAt = performance.now();
     await Generate('normal', { signal: abortController.signal });
+    markLatency('generate', stageStartedAt);
 
     if (!SillyTavern.getContext().groupId) {
+      stageStartedAt = performance.now();
       let inspection = await inspectAndFormatSoloReply();
+      markLatency('validate', stageStartedAt);
 
       if (inspection.invalid && !sharedState.streamResponses) {
         console.warn(
@@ -541,8 +574,12 @@ export async function handleUserMessage(data) {
         );
         await deleteLastMessage();
         safeSend({ type: 'typing_action', chatId: messageState.chatId });
+        stageStartedAt = performance.now();
         await Generate('normal', { signal: abortController.signal });
+        markLatency('retryGenerate', stageStartedAt);
+        stageStartedAt = performance.now();
         inspection = await inspectAndFormatSoloReply();
+        markLatency('retryValidate', stageStartedAt);
 
         if (inspection.invalid) {
           console.warn(
@@ -554,12 +591,25 @@ export async function handleUserMessage(data) {
 
       removeAllListeners();
       collectAndSendReplies();
+      const totalMs = Math.round(performance.now() - latencyStartedAt);
+      const endToEndMs = Number.isFinite(data.receivedAt)
+        ? Date.now() - data.receivedAt
+        : null;
+      console.info(
+        `[Discord Bridge][Latency ${latencyLabel}] completed; queue ${
+          data.queueDelayMs ?? 0
+        } ms; phases ${JSON.stringify(latencyParts)}; browser total ${
+          totalMs
+        } ms; end-to-end before Discord send ${endToEndMs ?? 'unknown'} ms`,
+      );
     }
   } catch (error) {
     console.error('[Discord Bridge] Generation error:', error);
     await deleteLastMessage();
     safeSend({
       type: 'error_message',
+      requestId: data.requestId,
+      receivedAt: data.receivedAt,
       chatId: messageState.chatId,
       text: t('reply.generationFailed', {
         message: error.message || 'Unknown',
