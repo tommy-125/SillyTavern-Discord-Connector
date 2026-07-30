@@ -1,216 +1,38 @@
-/**
- * config.example.js - SillyTavern Discord Connector: Configuration Template
- * Copyright (c) 2026 Senjin the Dragon.
- * https://github.com/senjinthedragon/SillyTavern-Discord-Connector
- * Licensed under the MIT License.
- * See /server/LICENSE for full license information.
- *
- * This is a template for the bridge configuration. To get started:
- * 1. Copy or rename this file to 'config.js' in the same directory.
- * 2. Fill in your Discord Bot Token and user/channel restrictions.
- * 3. Adjust advanced settings only if your environment requires it.
- *
- * Note: Essential settings (Discord token, access control) are at the top,
- * followed by general environment preferences and advanced logic for
- * circuit breakers and pro-plugin routing.
- */
+/** KuroHelper AI Runtime configuration. Discord credentials belong to kurohelper. */
 
 module.exports = {
-  // =========================================================================
-  // ESSENTIAL SETTINGS - fill these in to get the bridge running
-  // =========================================================================
+  // The built-in KuroHelper transport exposes an authenticated WebSocket API.
+  enabledPlugins: ["kurohelper"],
 
-  // Your Discord Bot Token.
-  // Obtain this from the Discord Developer Portal (discord.com/developers/applications).
-  discordToken: "YOUR_DISCORD_BOT_TOKEN_HERE",
-
-  // Restrict which Discord users can talk to the bot.
-  // Add your own Discord User ID here to keep the bot private to yourself.
-  // Leave empty to allow anyone - not recommended unless your server is private.
-  // To get a User ID: enable Developer Mode in Discord settings, then right-click
-  // a user and select "Copy User ID".
-  allowedUserIds: [], // e.g. ["123456789012345678", "987654321098765432"]
-
-  // Restrict which Discord channels the bot will respond in.
-  // Leave empty to allow all channels in your server.
-  // To get a Channel ID: enable Developer Mode in Discord settings, then
-  // right-click a channel and select "Copy Channel ID".
-  allowedChannelIds: [], // e.g. ["123456789012345678"]
-
-  // =========================================================================
-  // GENERAL SETTINGS - safe to leave as-is, but worth a look
-  // =========================================================================
-
-  // The port number the bridge listens on.
-  // The URL in the SillyTavern extension settings should read: ws://127.0.0.1:2333
-  // If you change this number, update just the number at the end of that URL to match.
-  // Only change this if port 2333 is already in use on your machine.
+  // SillyTavern browser extension WebSocket port (container-internal).
   wssPort: 2333,
 
-  // Timezone for log timestamps and chat date formatting in Discord autocomplete.
-  // Use IANA timezone names e.g. "Europe/Amsterdam", "America/New_York", "Asia/Tokyo".
-  timezone: "America/New_York",
-
-  // Locale for date/time formatting in Discord autocomplete chat lists.
-  // Use BCP 47 language tags e.g. "nl-NL", "en-GB", "en-US", "de-DE".
-  // Remove this line entirely to use your browser's default locale.
-  locale: "en-US",
-
-  // Language for Discord user-facing messages (bot replies, command responses).
-  // Use BCP 47 language tags e.g. "ja-JP", "ko-KR", "zh-CN", "nl-NL", "de-DE".
-  // Defaults to English if not set or if the locale file is not found.
-  // This is separate from locale above - set this to match your community,
-  // and locale to match your own preference for date display.
-  userLocale: "en-US",
-
-  // Set to true to enable verbose terminal logging for troubleshooting.
+  timezone: "Asia/Taipei",
+  locale: "zh-TW",
+  userLocale: "zh-TW",
   debug: false,
 
-  // When set, the bot responds to messages that begin with this prefix or
-  // messages that mention the bot directly.
-  // Useful for group chats where players talk amongst themselves and only want
-  // the bot to respond to prefixed messages (e.g. "! hello" or "！こんにちは").
-  // Any non-empty string works, including multi-byte unicode characters.
-  // When active, /delete is capped at 1 message to avoid deleting non-prefixed
-  // banter that was never tracked by the bot.
-  // Remove or comment out this line entirely to respond to every message in an
-  // allowed channel. The textual prefix is preserved for ST so the character
-  // can see how they were addressed; Discord mention markup is stripped.
-  // triggerPrefix: "!",
-
-  // =========================================================================
-  // ADVANCED SETTINGS - no need to touch these unless you know what you're
-  // doing. Defaults are sensible for most setups.
-  // =========================================================================
-
-  // How long a queued message send task may run before it is abandoned (seconds).
   queueTaskTimeoutSeconds: 30,
-
-  // How long the "🎨 Generating image…" placeholder waits before giving up
-  // and showing a timeout message (seconds).
   imagePlaceholderTimeoutSeconds: 180,
-
-  // Live previews repeatedly edit a Discord message while the model streams.
-  // Keep this false to send exactly one complete reply after generation.
   streamResponses: false,
+  dialogueOnlyResponses: true,
 
-  // Keep only dialogue spoken by the character. Stage directions are removed
-  // from SillyTavern history before the final reply is sent to Discord.
-  dialogueOnlyResponses: false,
+  // Stable Discord IDs arrive from KuroHelper under the "kurohelper" platform.
+  // Display names are used only as the human-readable Persona name.
+  autoCreatePersonas: true,
+  kurohelperPersonaMap: {},
+  kurohelperLanguageMap: {},
 
-  // Map platform user IDs to SillyTavern persona names.
-  // When set, the persona switches automatically before each message from that user.
-  // Users can also save their own preference with the /mypersona command, which
-  // takes priority over entries here.
-
-  // Discord: enable Developer Mode in Discord settings, then right-click a user
-  // and select "Copy User ID" to get their numeric ID.
-  discordPersonaMap: {
-    // "123456789012345678": "Alice",
-    // "987654321098765432": "Bob",
-  },
-
-  // Automatically create a persistent SillyTavern Persona for an unmapped
-  // Discord user on their first accepted message. The server nickname, global
-  // display name, or username is used and the User ID mapping is saved in
-  // persona-map.json. Existing discordPersonaMap and /mypersona choices win.
-  autoCreateDiscordPersonas: false,
-
-  // Telegram: use the numeric user ID (not the @username).
-  // You can get it from the bot's getUpdates response (msg.from.id).
-  telegramPersonaMap: {
-    // "123456789": "Alice",
-  },
-
-  // Signal: use the full phone number in E.164 format (e.g. "+31612345678").
-  signalPersonaMap: {
-    // "+31612345678": "Alice",
-  },
-
-  // Map platform user IDs to BCP 47 language codes for bot responses.
-  // When set, the bot replies to that user in their preferred language,
-  // regardless of the global userLocale setting above.
-  // Users can also set their own preference with /setlang, which takes
-  // priority over entries here.
-  // Use the same User ID format as the persona maps above.
-  discordLanguageMap: {
-    // "123456789012345678": "ja-JP",
-    // "987654321098765432": "nl",
-  },
-
-  // Telegram: use the numeric user ID (not the @username).
-  telegramLanguageMap: {
-    // "123456789": "ja-JP",
-  },
-
-  // Signal: use the full phone number in E.164 format (e.g. "+31612345678").
-  signalLanguageMap: {
-    // "+31612345678": "nl",
-  },
-
-  // Which frontend plugins to load. "discord" is the built-in free plugin.
-  // Add "telegram" or "signal" here only if you have purchased the pro plugins.
-  enabledPlugins: ["discord"],
-
-  // External plugin modules (pro plugins only).
-  // Pro plugins are purchased separately and not included in this free release.
-  // See https://github.com/senjinthedragon for more information.
-  externalPlugins: [
-    // {
-    //   name: "telegram",
-    //   module: "external-plugins/telegram-pro/telegram.js",
-    //   config: {
-    //     botToken: "YOUR_TELEGRAM_BOT_TOKEN",
-    //     // stickerPackName: "YourPackName", // Override the default SillyTavern expression sticker pack
-    //   },
-    // },
-    // {
-    //   name: "signal",
-    //   module: "external-plugins/signal-pro/signal.js",
-    //   config: {
-    //     baseUrl: "http://127.0.0.1:8080",
-    //     account: "+31123456789",
-    //   },
-    // },
-  ],
-
-  // Conversation links let one SillyTavern chat continue across platforms.
-  // Only relevant if you are using pro plugins with multiple frontends active.
-  conversationLinks: [
-    // {
-    //   conversationId: "main-chat",
-    //   discordChannelId: "123456789012345678",
-    //   telegramChatId: "987654321",
-    //   signalChatId: "+31123456789",
-    // },
-  ],
-
-  // Per-plugin circuit breaker settings.
-  // When enabled, the bridge will temporarily stop sending to a plugin if it
-  // keeps failing, rather than hammering a broken connection on every message.
-  // failureThreshold: how many consecutive failures before pausing.
-  // cooldownSeconds: how long to pause before trying again (in seconds).
+  externalPlugins: [],
   plugins: {
-    discord: {
+    kurohelper: {
+      // Set KUROHELPER_BRIDGE_SECRET through .env; do not place it here.
+      secret: "",
       circuitBreaker: {
-        enabled: false,
+        enabled: true,
         failureThreshold: 5,
         cooldownSeconds: 30,
       },
     },
-    // telegram: {
-    //   circuitBreaker: {
-    //     enabled: false,
-    //     failureThreshold: 5,
-    //     cooldownSeconds: 30,
-    //   },
-    // },
-    // signal: {
-    //   circuitBreaker: {
-    //     enabled: false,
-    //     failureThreshold: 5,
-    //     cooldownSeconds: 30,
-    //   },
-    // },
   },
 };

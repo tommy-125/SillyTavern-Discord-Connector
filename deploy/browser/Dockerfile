@@ -10,7 +10,7 @@ RUN mkdir -p /data/profile
 
 ENV NODE_ENV=production \
     SILLYTAVERN_URL=http://sillytavern:8000 \
-    CONNECTOR_BRIDGE_URL=ws://discord-bridge:2333 \
+    CONNECTOR_BRIDGE_URL=ws://ai-runtime:2333 \
     BROWSER_PROFILE_DIR=/data/profile
 
 CMD ["node", "runner.js"]

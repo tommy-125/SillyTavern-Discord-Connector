@@ -111,7 +111,7 @@ test("handleBridgePacket stream_end falls back sendText for non-streaming fronte
   assert.ok(
     deps.__calls.some(
       (c) =>
-        c[0] === "telegram" && c[1] === "sendText" && /\*\*Bot\*\*/.test(c[3]),
+        c[0] === "telegram" && c[1] === "sendText" && c[3] === "done",
     ),
   );
 });
@@ -168,7 +168,7 @@ test("handleBridgePacket removes leaked DeepSeek markers from ai_reply", async (
   assert.ok(sends.every((c) => c[3] === "……早安。"));
 });
 
-test("handleBridgePacket drops marker-only ai_reply", async () => {
+test("handleBridgePacket completes marker-only ai_reply with a retry message", async () => {
   const deps = createDeps();
 
   await handleBridgePacket(
@@ -180,7 +180,60 @@ test("handleBridgePacket drops marker-only ai_reply", async () => {
     deps,
   );
 
-  assert.equal(deps.__calls.filter((c) => c[1] === "sendText").length, 0);
+  const sends = deps.__calls.filter((c) => c[1] === "sendText");
+  assert.equal(sends.length, 2);
+  assert.ok(sends.every((call) => call[3] === "模型沒有產生可用的回覆，請再試一次。"));
+});
+
+test("handleBridgePacket does not prefix the character name", async () => {
+  const deps = createDeps();
+
+  await handleBridgePacket(
+    {
+      type: "ai_reply",
+      chatId: "conv1",
+      messages: [{ name: "Kuro", text: "早安。" }],
+    },
+    deps,
+  );
+
+  const sends = deps.__calls.filter((call) => call[1] === "sendText");
+  assert.equal(sends.length, 2);
+  assert.ok(sends.every((call) => call[3] === "早安。"));
+});
+
+test("handleBridgePacket submits a completed turn to long-term memory", async () => {
+  const turns = [];
+  const deps = createDeps({
+    rememberTurn: async (turn) => turns.push(turn),
+  });
+
+  await handleBridgePacket(
+    {
+      type: "ai_reply",
+      chatId: "conv1",
+      requestId: "request-1",
+      userId: "discord-user-1",
+      displayName: "肉圓",
+      mentionedUsers: [{ id: "discord-user-2", displayName: "Tommy" }],
+      contextParticipants: [{ id: "discord-user-3", displayName: "海獺" }],
+      memoryRecentContext: "[海獺] 大家星期六有空嗎？",
+      userText: "我喜歡咖啡",
+      messages: [{ name: "", text: "……記住了。" }],
+    },
+    deps,
+  );
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].userId, "discord-user-1");
+  assert.deepEqual(turns[0].mentionedUsers, [
+    { id: "discord-user-2", displayName: "Tommy" },
+  ]);
+  assert.deepEqual(turns[0].contextParticipants, [
+    { id: "discord-user-3", displayName: "海獺" },
+  ]);
+  assert.equal(turns[0].recentContext, "[海獺] 大家星期六有空嗎？");
+  assert.equal(turns[0].assistantText, "……記住了。");
 });
 
 test("handleBridgePacket removes leaked DeepSeek markers from stream chunks", async () => {

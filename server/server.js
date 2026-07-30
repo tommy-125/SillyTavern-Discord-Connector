@@ -5,17 +5,12 @@
  * Licensed under the MIT License.
  * See /server/LICENSE for full license information.
  *
- * Bootstraps the bridge: validates config, runs crash-loop protection, and
- * loads the Discord client and WebSocket server. Actual logic lives in:
+ * Bootstraps the tokenless AI runtime: validates config, runs crash-loop
+ * protection, and loads the WebSocket servers. Actual logic lives in:
  *
  *   config-loader.js  - config validation and exports
  *   logger.js         - timestamped, level-filtered logging
- *   queue.js          - per-channel async message queue
- *   messaging.js      - sendLong, image fetching and posting
- *   streaming.js      - stream session state and throttled Discord edits
- *   discord.js        - Discord client, slash commands, interaction handler
- *   websocket.js      - WebSocket server and ST→Discord message routing
- *   client.js         - Discord.js Client instance (separate to avoid circular refs)
+ *   websocket.js      - SillyTavern extension and runtime API routing
  */
 
 "use strict";
@@ -76,9 +71,4 @@ const RESTART_WINDOW_MS = 60_000;
 // so both need to be required before either's module-level code runs fully.
 require("./config-loader");
 require("./logger");
-require("./queue");
-require("./messaging");
-require("./streaming");
-require("./client");
-require("./discord");
 require("./websocket");

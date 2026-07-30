@@ -21,7 +21,7 @@
  * Extension settings - name, defaults, accessor, and status indicator.
  */
 
-export const MODULE_NAME = "SillyTavern-Discord-Connector";
+export const MODULE_NAME = "KuroHelper-AI-Runtime";
 
 export const DEFAULT_SETTINGS = {
   bridgeUrl: "ws://127.0.0.1:2333",

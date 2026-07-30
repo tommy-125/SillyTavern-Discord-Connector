@@ -36,6 +36,5 @@ try {
 
 module.exports = {
   config,
-  token: config.discordToken,
   wssPort: config.wssPort,
 };

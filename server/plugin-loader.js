@@ -5,8 +5,8 @@
  * Licensed under the MIT License.
  * See /server/LICENSE for full license information.
  *
- * Loads built-in frontends (currently Discord) plus optional external plugin
- * modules (for example private/pro plugins) declared in config.externalPlugins.
+ * Loads the built-in KuroHelper transport plus optional external plugin modules
+ * declared in config.externalPlugins.
  */
 
 "use strict";
@@ -80,14 +80,17 @@ async function loadExternalPlugins(handlers) {
 function createPluginLoader(handlers) {
   return {
     async start() {
-      const enabled = config.enabledPlugins || ["discord"];
+      const enabled = config.enabledPlugins || ["kurohelper"];
 
-      if (enabled.includes("discord")) {
-        const { createDiscordPlugin } = require("./plugins/discord");
-        const discordPlugin = createDiscordPlugin(handlers);
-        registerFrontend("discord", discordPlugin);
-        await discordPlugin.start();
-        log("log", "[Plugins] Discord plugin loaded.");
+      if (enabled.includes("kurohelper")) {
+        const { createKuroHelperPlugin } = require("./plugins/kurohelper");
+        const kuroHelperPlugin = createKuroHelperPlugin(
+          handlers,
+          config.plugins?.kurohelper || {},
+        );
+        registerFrontend("kurohelper", kuroHelperPlugin);
+        await kuroHelperPlugin.start();
+        log("log", "[Plugins] KuroHelper backend transport loaded.");
       }
 
       await loadExternalPlugins(handlers);

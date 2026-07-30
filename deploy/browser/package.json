@@ -1,8 +1,8 @@
 {
-  "name": "sillytavern-connector-browser-worker",
+  "name": "kurohelper-ai-runtime-browser-worker",
   "version": "1.0.0",
   "private": true,
-  "description": "Keeps the SillyTavern Discord Connector running in headless Chromium.",
+  "description": "Keeps the KuroHelper SillyTavern runtime running in headless Chromium.",
   "main": "runner.js",
   "scripts": {
     "start": "node runner.js",

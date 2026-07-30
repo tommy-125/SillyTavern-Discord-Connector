@@ -1,12 +1,12 @@
 {
-  "name": "@senjinthedragon/sillytavern-discord-connector",
-  "version": "1.8.3",
-  "description": "Full-featured Discord bridge for SillyTavern with image support and slash commands.",
+  "name": "kurohelper-ai-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tokenless SillyTavern generation and memory runtime for KuroHelper.",
   "keywords": [
     "sillytavern",
-    "discord",
-    "bridge",
-    "bot",
+    "runtime",
+    "memory",
     "roleplay",
     "connector",
     "chatbot",
@@ -22,7 +22,7 @@
     "server/*.js",
     "server/package.json",
     "server/config.example.js",
-    "server/start-bridge.bat",
+    "server/start-runtime.bat",
     "!server/config.js",
     "scripts/release-checklist.js"
   ],
@@ -36,14 +36,11 @@
     "install-server": "cd server && npm install",
     "test-release": "npm run verify-release",
     "start": "cd server && node server.js",
+    "configure-runtime-secret": "node scripts/configure-runtime-secret.mjs",
     "release-checklist": "node scripts/release-checklist.js"
   },
   "author": "Senjin the Dragon <https://github.com/senjinthedragon>",
   "license": "MIT",
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/senjinthedragon/SillyTavern-Discord-Connector.git"

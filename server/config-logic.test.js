@@ -88,36 +88,9 @@ test("createConfig defaults wssPort to 2333 and rejects invalid values", () => {
   );
 });
 
-test("createConfig throws for placeholder Discord token when Discord plugin is enabled", () => {
-  assert.throws(
-    () =>
-      createConfig({
-        enabledPlugins: ["discord"],
-        discordToken: "YOUR_DISCORD_BOT_TOKEN_HERE",
-      }),
-    /Discord plugin is enabled|Discord Bot Token/,
-  );
-});
-
-test("createConfig throws when Discord is enabled but token is missing or empty", () => {
-  assert.throws(
-    () => createConfig({ enabledPlugins: ["discord"] }),
-    /discordToken is required/,
-  );
-  assert.throws(
-    () => createConfig({ enabledPlugins: ["discord"], discordToken: "" }),
-    /discordToken is required/,
-  );
-  assert.throws(
-    () => createConfig({ enabledPlugins: ["discord"], discordToken: null }),
-    /discordToken is required/,
-  );
-});
-
-test("createConfig does not require discordToken when Discord plugin is not enabled", () => {
-  assert.doesNotThrow(() =>
-    createConfig({ enabledPlugins: ["telegram"], wssPort: 2333 }),
-  );
+test("createConfig never requires a Discord token", () => {
+  const { config } = createConfig({ enabledPlugins: ["kurohelper"] });
+  assert.equal(Object.hasOwn(config, "discordToken"), false);
 });
 
 test("createConfig allows non-discord enabled plugin names for external plugins", () => {

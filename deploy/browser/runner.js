@@ -7,7 +7,7 @@ const { chromium } = require("playwright");
 
 const ST_URL = process.env.SILLYTAVERN_URL || "http://sillytavern:8000";
 const BRIDGE_URL =
-  process.env.CONNECTOR_BRIDGE_URL || "ws://discord-bridge:2333";
+  process.env.CONNECTOR_BRIDGE_URL || "ws://ai-runtime:2333";
 const PROFILE_DIR = process.env.BROWSER_PROFILE_DIR || "/data/profile";
 const UI_TIMEOUT_MS = positiveInt(
   process.env.CONNECTOR_UI_TIMEOUT_MS,
@@ -320,7 +320,7 @@ async function connectExtension(page) {
   await page.evaluate(() => {
     const connect = document.querySelector("#discord_connect_button");
     if (!(connect instanceof HTMLInputElement)) {
-      throw new Error("Discord Connector connect button is unavailable");
+      throw new Error("KuroHelper AI Runtime connect button is unavailable");
     }
     connect.click();
   });

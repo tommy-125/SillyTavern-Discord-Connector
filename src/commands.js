@@ -40,6 +40,9 @@ import {
   deleteLastMessage,
   saveChatConditional,
   setUserName,
+  setExtensionPrompt,
+  extension_prompt_types,
+  extension_prompt_roles,
 } from '../../../../../script.js';
 
 import { executeSlashCommandsWithOptions } from '../../../../../scripts/slash-commands.js';
@@ -78,10 +81,13 @@ import {
 import { buildLastExchange, buildHistory, scheduleRecap } from './recap.js';
 import { looksLikePromptLeak } from './model-output-guard.mjs';
 import { formatDialogueOnly } from './dialogue-only.mjs';
+import { suppressPreviousChatMessages } from './prompt-history.mjs';
 
 // String fallback covers older ST versions that don't export this event type.
 const GROUP_WRAPPER_FINISHED =
   event_types.GROUP_WRAPPER_FINISHED ?? 'group_wrapper_finished';
+const MEMORY_PROMPT_KEY = 'discord_connector_long_term_memory';
+const RECENT_CHANNEL_PROMPT_KEY = 'discord_connector_recent_channel_context';
 
 // ---------------------------------------------------------------------------
 // Autocomplete cache
@@ -236,6 +242,7 @@ export async function handleUserMessage(data) {
 
   sharedState.lastActiveChatId = data.chatId || sharedState.lastActiveChatId;
   sharedState.lastActiveUserLocale = data.userLocale ?? null;
+  latencyParts.memoryRecall = Number(data.memoryRecallMs) || 0;
 
   // Resolve per-user locale so error messages reach the user in their language.
   // eslint-disable-next-line no-shadow
@@ -472,6 +479,13 @@ export async function handleUserMessage(data) {
         type: 'ai_reply',
         requestId: data.requestId,
         receivedAt: data.receivedAt,
+        userId: data.userId,
+        mentionedUsers: data.mentionedUsers,
+        contextParticipants: data.contextParticipants,
+        memoryRecentContext: data.memoryRecentContext,
+        platform: data.platform,
+        displayName: data.displayName,
+        userText: data.text,
         chatId: messageState.chatId,
         messages: aiMessages,
       });
@@ -556,7 +570,32 @@ export async function handleUserMessage(data) {
   };
   eventSource.once(event_types.GENERATION_STOPPED, onGenerationStopped);
 
+  const stContext = SillyTavern.getContext();
+  const restorePromptHistory = suppressPreviousChatMessages(
+    stContext.chat,
+    stContext.symbols?.ignore ?? Symbol.for('ignore'),
+  );
   try {
+    if (data.recentChannelContext) {
+      setExtensionPrompt(
+        RECENT_CHANNEL_PROMPT_KEY,
+        String(data.recentChannelContext).slice(0, 8_000),
+        extension_prompt_types.IN_CHAT,
+        1,
+        false,
+        extension_prompt_roles.SYSTEM,
+      );
+    }
+    if (data.memoryContext) {
+      setExtensionPrompt(
+        MEMORY_PROMPT_KEY,
+        String(data.memoryContext).slice(0, 8_000),
+        extension_prompt_types.IN_CHAT,
+        1,
+        false,
+        extension_prompt_roles.SYSTEM,
+      );
+    }
     const abortController = new AbortController();
     setExternalAbortController(abortController);
     stageStartedAt = performance.now();
@@ -617,6 +656,24 @@ export async function handleUserMessage(data) {
     });
     removeAllListeners();
     sendStreamEnd();
+  } finally {
+    restorePromptHistory();
+    setExtensionPrompt(
+      RECENT_CHANNEL_PROMPT_KEY,
+      '',
+      extension_prompt_types.IN_CHAT,
+      1,
+      false,
+      extension_prompt_roles.SYSTEM,
+    );
+    setExtensionPrompt(
+      MEMORY_PROMPT_KEY,
+      '',
+      extension_prompt_types.IN_CHAT,
+      1,
+      false,
+      extension_prompt_roles.SYSTEM,
+    );
   }
 }
 
@@ -1241,6 +1298,8 @@ export async function handleExecuteCommand(data) {
           t('help.chars'),
           '',
           t('help.chats'),
+          '',
+          t('help.memory'),
           '',
           t('help.persona'),
           ...(getSettings().allowUserPersonaSave

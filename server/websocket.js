@@ -14,7 +14,7 @@
 const WebSocket = require('ws');
 const { log } = require('./logger');
 const { config, wssPort } = require('./config-loader');
-const { streamSessions } = require('./streaming');
+const { rememberTurn, recallMemories } = require('./memory-client');
 const { createPluginLoader } = require('./plugin-loader');
 const {
   fanout,
@@ -26,16 +26,12 @@ const {
   parseRoute,
   getRegisteredPlatforms,
 } = require('./frontend-manager');
-const {
-  setBridgeActivity,
-  getPendingAutocompletes,
-  getAutocompleteDebouncers,
-} = require('./discord');
 const { handleBridgePacket } = require('./websocket-router');
 const { loadLocale, makeTranslator } = require('./i18n');
 const {
   load: loadPersonaMap,
   getPersonaForUser,
+  ensurePersonaForUser,
   setPersonaForUser,
   setDefaultPersonaName,
   getDefaultPersonaName,
@@ -58,7 +54,7 @@ const purple = canColor ? '[38;5;93m' : '';
 const gold = canColor ? '[38;5;220m' : '';
 const reset = canColor ? '[0m' : '';
 
-const title = ` SILLYTAVERN DISCORD CONNECTOR - v${version}`;
+const title = ` KUROHELPER AI RUNTIME - v${version}`;
 const credit = ` Developed by Senjin the Dragon https://github.com/senjinthedragon`;
 const support = ` Please support my work: https://github.com/sponsors/senjinthedragon`;
 const btc = ` Bitcoin: bc1qjsaqw6rjcmhv6ywv2a97wfd4zxnae3ncrn8mf9`;
@@ -77,6 +73,8 @@ loadLangMap();
 loadLocale(config.userLocale || null);
 
 let sillyTavernClient = null;
+const pendingAutocompletes = {};
+const autocompleteDebouncers = {};
 const pendingImageMessages = {};
 const cancelledImageRequests = new Set();
 const timedOutImageRequests = new Set();
@@ -85,6 +83,21 @@ const streamReceived = new Set();
 
 function getSillyTavernClient() {
   return sillyTavernClient;
+}
+
+function getPendingAutocompletes() {
+  return pendingAutocompletes;
+}
+
+function getAutocompleteDebouncers() {
+  return autocompleteDebouncers;
+}
+
+function setBridgeActivity(expression, ownerName) {
+  for (const platform of getRegisteredPlatforms()) {
+    const frontend = getFrontend(platform);
+    frontend?.setActivity?.(expression, ownerName);
+  }
 }
 
 function sendToSillyTavern(payload) {
@@ -138,6 +151,7 @@ async function handleOfflineCommand(
       tl('help.title'),
       tl('help.offlineNote'),
       tl('help.offlineInfo'),
+      tl('help.memory'),
       tl('help.lang'),
       tl('help.footer'),
     ];
@@ -191,24 +205,62 @@ async function handleOfflineCommand(
 }
 
 const pluginLoader = createPluginLoader({
-  onUserMessage(platform, chatId, text, userId = '') {
+  async onUserMessage(platform, chatId, text, userId = '', metadata = {}) {
     const conversationId = resolveConversationId(platform, chatId);
     addRoute(conversationId, platform, chatId);
-    const mappedPersona = getPersonaForUser(platform, userId);
+    let mappedPersona = getPersonaForUser(platform, userId);
+    if (
+      !mappedPersona &&
+      (config.autoCreatePersonas === true ||
+        config.autoCreateDiscordPersonas === true) &&
+      metadata.displayName
+    ) {
+      mappedPersona = ensurePersonaForUser(
+        platform,
+        userId,
+        metadata.displayName,
+      ).personaName;
+    }
     const userLocale = getLangForUser(platform, userId) || null;
+    if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    const memory = await recallMemories({
+      query: [
+        metadata.retrievalText,
+        `[${metadata.displayName || userId}] ${text}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      channelId: conversationId,
+      participantIds: [
+        userId,
+        ...(metadata.mentionedUsers || []).map((user) => user?.id),
+        ...(metadata.contextParticipants || []).map((user) => user?.id),
+      ].filter(Boolean),
+    });
     sendToSillyTavern({
       type: 'user_message',
       text,
       chatId: conversationId,
       userId,
       platform,
+      requestId: metadata.requestId || '',
+      receivedAt: Date.now(),
+      displayName: metadata.displayName || '',
+      mentionedUsers: metadata.mentionedUsers || [],
+      contextParticipants: metadata.contextParticipants || [],
+      recentChannelContext: metadata.recentChannelContext || '',
+      memoryRecentContext: metadata.retrievalText || '',
+      memoryContext: memory.context || '',
+      memoryRecallMs: memory.elapsedMs || 0,
       ...(mappedPersona ? { mappedPersona } : {}),
       ...(userLocale ? { userLocale } : {}),
     });
 
     // Cross-relay the user's message to all other platforms in the same
     // conversation so every connected client stays in sync.
-    if (!isCrossRelayEnabled()) return;
+    if (!isCrossRelayEnabled()) return true;
     const originKey = `${platform}:${chatId}`;
     const senderLabel =
       mappedPersona || getDefaultPersonaName() || `[${platform}]`;
@@ -223,10 +275,16 @@ const pluginLoader = createPluginLoader({
         log('warn', `[Bridge] Cross-relay to ${route} failed: ${err.message}`);
       });
     }
+    return true;
   },
   onCommand(platform, chatId, command, args, userId = '') {
     dispatchCommand(platform, chatId, command, args, userId);
   },
+  isSillyTavernReady: () =>
+    Boolean(
+      sillyTavernClient && sillyTavernClient.readyState === WebSocket.OPEN,
+    ),
+  log,
 });
 
 pluginLoader.start().catch((err) => {
@@ -254,7 +312,7 @@ wss.on('connection', (ws) => {
   // successfully registered via registerFrontend() are marked "active".
   // Others show as "not_loaded" so the extension can tease pro platforms
   // to free version users.
-  const KNOWN_PLATFORMS = ['discord', 'telegram', 'signal'];
+  const KNOWN_PLATFORMS = ['kurohelper'];
   const registeredPlatforms = getRegisteredPlatforms();
   const pluginStatus = Object.fromEntries(
     KNOWN_PLATFORMS.map((p) => [
@@ -305,6 +363,7 @@ wss.on('connection', (ws) => {
       setLangForUser,
       setCurrentPersonaName: setDefaultPersonaName,
       setCrossRelayEnabled,
+      rememberTurn,
       log,
     });
   });
@@ -316,9 +375,6 @@ wss.on('connection', (ws) => {
     clearRoutes();
     setBridgeActivity(null);
 
-    for (const key of Object.keys(streamSessions)) {
-      delete streamSessions[key];
-    }
     streamHandled.clear();
     streamReceived.clear();
 

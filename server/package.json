@@ -1,7 +1,8 @@
 {
-  "name": "sillytavern-discord-bridge",
-  "version": "1.8.3",
-  "description": "Discord bridge server for SillyTavern",
+  "name": "kurohelper-ai-runtime-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tokenless SillyTavern AI runtime for KuroHelper",
   "author": "Senjin the Dragon <https://github.com/senjinthedragon>",
   "license": "MIT",
   "homepage": "https://github.com/senjinthedragon/SillyTavern-Discord-Connector",
@@ -15,8 +16,6 @@
     "test": "node --test *.test.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "jimp": "^1.6.0",
     "ws": "^8.18.0",
     "undici": "^6.24.0"
   },

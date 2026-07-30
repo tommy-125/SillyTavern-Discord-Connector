@@ -1,0 +1,5 @@
+chromadb==1.5.9
+fastapi==0.140.3
+fastembed==0.8.0
+httpx==0.28.1
+uvicorn==0.51.0

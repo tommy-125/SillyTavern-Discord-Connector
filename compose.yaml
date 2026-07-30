@@ -1,4 +1,4 @@
-name: sillytavern-discord
+name: kurohelper-ai-runtime
 
 services:
   character-seed:
@@ -22,7 +22,7 @@ services:
         fi
     volumes:
       - type: bind
-        source: ${ST_CHARACTER_CARD_PATH:-../kuro-character/Kuro-character-card-gpt-5.6-sol/Kuro_chara_card.discord.png}
+        source: ${ST_CHARACTER_CARD_PATH:-../../kuro/kuro-character/Kuro-character-card-gpt-5.6-sol/Kuro_chara_card.discord.dedup.png}
         target: /seed/character.png
         read_only: true
       - ./runtime/sillytavern/data:/data
@@ -33,7 +33,7 @@ services:
       dockerfile: deploy/sillytavern/Dockerfile
       args:
         SILLYTAVERN_VERSION: ${SILLYTAVERN_VERSION:-1.18.0}
-    image: ${SILLYTAVERN_IMAGE:-local/sillytavern-discord}:${SILLYTAVERN_VERSION:-1.18.0}
+    image: ${SILLYTAVERN_IMAGE:-local/kurohelper-sillytavern}:${SILLYTAVERN_VERSION:-1.18.0}
     container_name: sillytavern
     restart: unless-stopped
     depends_on:
@@ -67,24 +67,58 @@ services:
       start_period: 30s
       retries: 5
 
-  discord-bridge:
+  ai-runtime:
     build:
       context: .
-      dockerfile: deploy/bridge/Dockerfile
-    image: ${BRIDGE_IMAGE:-local/sillytavern-discord-bridge}:1.8.3
-    container_name: discord-bridge
+      dockerfile: deploy/runtime/Dockerfile
+    image: ${RUNTIME_IMAGE:-local/kurohelper-ai-runtime}:1.0.0
+    container_name: kurohelper-ai-runtime
     restart: unless-stopped
+    depends_on:
+      memory-service:
+        condition: service_started
     environment:
       NODE_ENV: production
       CONNECTOR_DATA_DIR: /data
+      MEMORY_ENABLED: ${MEMORY_ENABLED:-true}
+      MEMORY_SERVICE_URL: http://memory-service:8090
+      MEMORY_RECALL_TIMEOUT_MS: ${MEMORY_RECALL_TIMEOUT_MS:-500}
+      MEMORY_CHARACTER_ID: ${MEMORY_CHARACTER_ID:-Kuro}
+      MEMORY_TRASH_RETENTION_DAYS: ${MEMORY_TRASH_RETENTION_DAYS:-30}
+      KUROHELPER_API_HOST: 0.0.0.0
+      KUROHELPER_API_PORT: 2334
+      KUROHELPER_BRIDGE_SECRET: ${KUROHELPER_BRIDGE_SECRET:-}
     expose:
       - "2333"
+    ports:
+      - "127.0.0.1:${KUROHELPER_RUNTIME_PORT:-2334}:2334"
     volumes:
       - type: bind
         source: ./server/config.js
         target: /app/config.js
         read_only: true
-      - ./runtime/bridge:/data
+      - ./runtime/runtime:/data
+
+  memory-service:
+    build:
+      context: .
+      dockerfile: deploy/memory/Dockerfile
+    image: ${MEMORY_IMAGE:-local/kuro-memory-service}:1.0.0
+    container_name: kuro-memory-service
+    restart: unless-stopped
+    environment:
+      MEMORY_DATA_DIR: /data
+      MEMORY_EMBEDDING_MODEL: ${MEMORY_EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
+      MEMORY_EXTRACTION_MODEL: ${MEMORY_EXTRACTION_MODEL:-deepseek/deepseek-v4-flash}
+      MEMORY_MAINTENANCE_INTERVAL_SECONDS: ${MEMORY_MAINTENANCE_INTERVAL_SECONDS:-21600}
+      MEMORY_TRASH_RETENTION_DAYS: ${MEMORY_TRASH_RETENTION_DAYS:-30}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      TZ: ${TZ:-Asia/Taipei}
+    expose:
+      - "8090"
+    volumes:
+      - ./runtime/memory:/data
 
   browser-worker:
     build:
@@ -97,11 +131,11 @@ services:
     depends_on:
       sillytavern:
         condition: service_healthy
-      discord-bridge:
+      ai-runtime:
         condition: service_started
     environment:
       SILLYTAVERN_URL: http://sillytavern:8000
-      CONNECTOR_BRIDGE_URL: ws://discord-bridge:2333
+      CONNECTOR_BRIDGE_URL: ws://ai-runtime:2333
       ST_BASIC_AUTH_USERNAME: ${ST_BASIC_AUTH_USERNAME:-}
       ST_BASIC_AUTH_PASSWORD: ${ST_BASIC_AUTH_PASSWORD:-}
       CONNECTOR_UI_TIMEOUT_MS: ${CONNECTOR_UI_TIMEOUT_MS:-120000}

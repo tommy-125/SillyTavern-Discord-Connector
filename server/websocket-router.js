@@ -32,6 +32,7 @@ async function handleBridgePacket(data, deps) {
     setLangForUser,
     setCurrentPersonaName,
     setCrossRelayEnabled,
+    rememberTurn,
     log,
   } = deps;
 
@@ -160,6 +161,7 @@ async function handleBridgePacket(data, deps) {
         streamId,
         finalText,
         characterName: data.characterName || null,
+        requestId: data.requestId || "",
       };
 
       const streamedRoutes = new Set(
@@ -167,21 +169,23 @@ async function handleBridgePacket(data, deps) {
       );
 
       if (finalText?.trim()) {
-        const text = data.characterName
-          ? `**${data.characterName}**\n${finalText}`
-          : finalText;
+        const text = finalText;
 
         for (const route of getRoutes(conversationId)) {
           if (streamedRoutes.has(route)) continue;
           const { platform, nativeChatId } = parseRoute(route);
           const frontend = getFrontend(platform);
           if (!frontend?.sendText) continue;
-          await frontend.sendText(nativeChatId, text);
+          await frontend.sendText(nativeChatId, text, {
+            kind: "ai_reply",
+            requestId: data.requestId || "",
+            final: true,
+          });
         }
       }
 
       streamHandled.add(conversationId);
-      setTimeout(() => streamHandled.delete(conversationId), 10000);
+      setTimeout(() => streamHandled.delete(conversationId), 10000).unref?.();
       break;
     }
 
@@ -197,13 +201,61 @@ async function handleBridgePacket(data, deps) {
 
       const messages =
         data?.messages || (data?.text ? [{ name: "", text: data.text }] : []);
-      for (const msg of messages) {
-        const cleanText = sanitizeModelOutput(msg?.text);
-        if (!cleanText) continue;
-        const text = msg.name
-          ? `**${msg.name}**\n${cleanText}`
-          : cleanText;
-        await fanout(conversationId, "sendText", text);
+      const deliverable = messages
+        .map((msg) => ({
+          name: msg?.name || "",
+          text: sanitizeModelOutput(msg?.text),
+        }))
+        .filter((msg) => msg.text);
+
+      if (deliverable.length === 0) {
+        await fanout(
+          conversationId,
+          "sendText",
+          "模型沒有產生可用的回覆，請再試一次。",
+          {
+            kind: "error",
+            requestId: data.requestId || "",
+            final: true,
+          },
+        );
+        break;
+      }
+      const delivered = [];
+      for (let index = 0; index < deliverable.length; index += 1) {
+        const msg = deliverable[index];
+        const cleanText = msg.text;
+        delivered.push(cleanText);
+        // Discord already displays the bot/character name. Returning only the
+        // generated text also prevents repeated bold "Kuro" headings.
+        const text = cleanText;
+        await fanout(conversationId, "sendText", text, {
+          kind: "ai_reply",
+          requestId: data.requestId || "",
+          final: index === deliverable.length - 1,
+        });
+      }
+      if (
+        delivered.length > 0 &&
+        typeof rememberTurn === "function" &&
+        data.userId &&
+        data.userText
+      ) {
+        Promise.resolve(
+          rememberTurn({
+            requestId: data.requestId || "",
+            userId: data.userId,
+            channelId: conversationId,
+            displayName: data.displayName || "",
+            mentionedUsers: data.mentionedUsers || [],
+            contextParticipants: data.contextParticipants || [],
+            recentContext: data.memoryRecentContext || "",
+            userText: data.userText,
+            assistantText: delivered.join("\n\n"),
+          }),
+        ).catch((error) =>
+          log("warn", `[Memory] Could not submit turn: ${error.message}`),
+        );
       }
       break;
     }
@@ -211,7 +263,11 @@ async function handleBridgePacket(data, deps) {
     case "error_message":
     case "intro_message":
       if (data?.text?.trim())
-        await fanout(conversationId, "sendText", data.text.trim());
+        await fanout(conversationId, "sendText", data.text.trim(), {
+          kind: "error",
+          requestId: data.requestId || "",
+          final: true,
+        });
       break;
 
     case "recap_message":

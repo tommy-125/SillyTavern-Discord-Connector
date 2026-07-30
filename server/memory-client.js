@@ -1,0 +1,183 @@
+/**
+ * Fail-open client for the optional long-term memory service.
+ * Recall is tightly bounded; extraction is submitted after Discord delivery.
+ */
+
+"use strict";
+
+function parseEnabled(value, fallback = false) {
+  if (value == null || value === "") return fallback;
+  return !["0", "false", "no", "off"].includes(String(value).toLowerCase());
+}
+
+function positiveInt(value, fallback) {
+  const parsed = Number.parseInt(value || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function createMemoryClient(options = {}) {
+  const enabled =
+    options.enabled ?? parseEnabled(process.env.MEMORY_ENABLED, false);
+  const baseUrl = String(
+    options.baseUrl || process.env.MEMORY_SERVICE_URL || "http://memory-service:8090",
+  ).replace(/\/+$/, "");
+  const timeoutMs = positiveInt(
+    options.timeoutMs || process.env.MEMORY_RECALL_TIMEOUT_MS,
+    500,
+  );
+  const characterId = String(
+    options.characterId || process.env.MEMORY_CHARACTER_ID || "Kuro",
+  );
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  const log = options.log || (() => {});
+
+  async function post(path, body, timeout) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    timer.unref?.();
+    try {
+      const response = await fetchImpl(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`memory service returned HTTP ${response.status}`);
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function recall({ query, limit = 5, channelId = "", participantIds = [] }) {
+    if (!enabled || !String(query || "").trim()) {
+      return { context: "", memories: [], elapsedMs: 0 };
+    }
+    const startedAt = Date.now();
+    try {
+      const result = await post(
+        "/v1/recall",
+        {
+          character_id: characterId,
+          query: String(query),
+          limit: Math.max(1, Math.min(Number(limit) || 5, 10)),
+          channel_id: String(channelId || ""),
+          participant_ids: Array.isArray(participantIds)
+            ? [...new Set(participantIds.map(String).filter(Boolean))].slice(0, 25)
+            : [],
+        },
+        timeoutMs,
+      );
+      return {
+        context: String(result?.context || "").slice(0, 8_000),
+        memories: Array.isArray(result?.memories) ? result.memories : [],
+        elapsedMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      log(
+        "warn",
+        `[Memory] Recall skipped after ${Date.now() - startedAt} ms: ${error.message}`,
+      );
+      return { context: "", memories: [], elapsedMs: Date.now() - startedAt };
+    }
+  }
+
+  async function rememberTurn(turn) {
+    if (!enabled || !turn?.userId || !turn?.userText || !turn?.assistantText) {
+      return false;
+    }
+    try {
+      await post(
+        "/v1/turns",
+        {
+          request_id: String(turn.requestId || ""),
+          character_id: characterId,
+          user_id: String(turn.userId),
+          channel_id: String(turn.channelId || ""),
+          display_name: String(turn.displayName || ""),
+          mentioned_users: Array.isArray(turn.mentionedUsers)
+            ? turn.mentionedUsers.slice(0, 25).map((user) => ({
+                id: String(user?.id || ""),
+                display_name: String(user?.displayName || ""),
+              }))
+            : [],
+          context_participants: Array.isArray(turn.contextParticipants)
+            ? turn.contextParticipants.slice(0, 25).map((user) => ({
+                id: String(user?.id || ""),
+                display_name: String(user?.displayName || ""),
+              })).filter((user) => user.id)
+            : [],
+          recent_context: String(turn.recentContext || "").slice(0, 8_000),
+          user_text: String(turn.userText),
+          assistant_text: String(turn.assistantText),
+        },
+        2_000,
+      );
+      return true;
+    } catch (error) {
+      log("warn", `[Memory] Background write skipped: ${error.message}`);
+      return false;
+    }
+  }
+
+  async function manage(path, body = {}) {
+    if (!enabled) {
+      return { status: "disabled", memories: [], count: 0 };
+    }
+    try {
+      return await post(
+        `/v1/manage/${path}`,
+        { character_id: characterId, ...body },
+        Math.max(2_000, timeoutMs),
+      );
+    } catch (error) {
+      log("warn", `[Memory] Management request failed: ${error.message}`);
+      return { status: "unavailable", memories: [], count: 0 };
+    }
+  }
+
+  async function listMemories({ status = "active", limit = 20, offset = 0 } = {}) {
+    return manage("list", {
+      status: status === "deleted" ? "deleted" : "active",
+      limit: Math.max(1, Math.min(Number(limit) || 20, 50)),
+      offset: Math.max(0, Math.min(Number(offset) || 0, 1_000_000)),
+    });
+  }
+
+  async function forgetMemory(memoryId) {
+    return manage("forget", { memory_id: String(memoryId || "") });
+  }
+
+  async function restoreMemory(memoryId) {
+    return manage("restore", { memory_id: String(memoryId || "") });
+  }
+
+  async function clearMemories() {
+    return manage("clear");
+  }
+
+  return {
+    recall,
+    rememberTurn,
+    listMemories,
+    forgetMemory,
+    restoreMemory,
+    clearMemories,
+    enabled,
+    characterId,
+  };
+}
+
+const defaultClient = createMemoryClient();
+
+module.exports = {
+  createMemoryClient,
+  recallMemories: defaultClient.recall,
+  rememberTurn: defaultClient.rememberTurn,
+  listMemories: defaultClient.listMemories,
+  forgetMemory: defaultClient.forgetMemory,
+  restoreMemory: defaultClient.restoreMemory,
+  clearMemories: defaultClient.clearMemories,
+};

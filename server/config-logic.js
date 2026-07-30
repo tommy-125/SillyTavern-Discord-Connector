@@ -10,11 +10,7 @@
  * parameters are present and correctly typed before the server boots.
  *
  * Key responsibilities:
- * - Enforces the presence of essential credentials like the Discord Bot Token.
- *   Requires a non-empty, non-whitespace string when the Discord plugin is
- *   enabled (default). Rejects the placeholder value from config.example.js.
- * - Validates enabledPlugins before checking Discord token requirements so
- *   invalid types produce a clean error rather than a raw TypeError.
+ * - Validates the enabled tokenless runtime transports.
  * - Validates wssPort as an integer in the range 1-65535 (default: 2333).
  * - Normalizes user-friendly time settings (seconds) into internal
  *   millisecond values used by the queue and watchdog timers.
@@ -30,6 +26,7 @@
 
 function createConfig(rawConfig) {
   const config = {
+    enabledPlugins: ["kurohelper"],
     wssPort: 2333,
     queueTaskTimeoutSeconds: 30,
     imagePlaceholderTimeoutSeconds: 180,
@@ -60,26 +57,8 @@ function createConfig(rawConfig) {
       ))
   ) {
     throw new Error(
-      'config.enabledPlugins entries must be non-empty strings (e.g. ["discord"]).',
+      'config.enabledPlugins entries must be non-empty strings (e.g. ["kurohelper"]).',
     );
-  }
-
-  const discordEnabled =
-    config.enabledPlugins === undefined ||
-    (Array.isArray(config.enabledPlugins) &&
-      config.enabledPlugins.includes("discord"));
-  if (discordEnabled) {
-    if (config.discordToken === "YOUR_DISCORD_BOT_TOKEN_HERE") {
-      throw new Error("Set your Discord Bot Token in config.js!");
-    }
-    if (
-      typeof config.discordToken !== "string" ||
-      config.discordToken.trim() === ""
-    ) {
-      throw new Error(
-        "config.discordToken is required when the Discord plugin is enabled.",
-      );
-    }
   }
 
   if (
@@ -184,7 +163,7 @@ function createConfig(rawConfig) {
     config.triggerPrefix = undefined;
   }
 
-  for (const platform of ["discord", "telegram", "signal"]) {
+  for (const platform of ["kurohelper", "telegram", "signal"]) {
     const mapKey = `${platform}LanguageMap`;
     if (config[mapKey] !== undefined) {
       if (

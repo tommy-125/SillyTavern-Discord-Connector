@@ -8,13 +8,13 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY --chown=node:node server/ ./
-COPY --chown=root:root deploy/bridge/entrypoint.sh /usr/local/bin/bridge-entrypoint
-RUN chmod 0755 /usr/local/bin/bridge-entrypoint && mkdir -p /data
+COPY --chown=root:root deploy/runtime/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
+RUN chmod 0755 /usr/local/bin/runtime-entrypoint && mkdir -p /data
 
 ENV NODE_ENV=production \
     CONNECTOR_DATA_DIR=/data
 
-EXPOSE 2333
+EXPOSE 2333 2334
 
-ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/bridge-entrypoint"]
+ENTRYPOINT ["dumb-init", "--", "/usr/local/bin/runtime-entrypoint"]
 CMD ["node", "server.js"]

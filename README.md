@@ -1,178 +1,82 @@
-# SillyTavern Discord Connector
+# KuroHelper AI Runtime
 
-[![Build Status](https://github.com/senjinthedragon/SillyTavern-Discord-Connector/actions/workflows/publish.yml/badge.svg)](https://github.com/senjinthedragon/SillyTavern-Discord-Connector/actions/workflows/publish.yml)
-[![License: MIT + AGPL](https://img.shields.io/badge/License-MIT%20%2B%20AGPL-purple.svg)](https://github.com/senjinthedragon/SillyTavern-Discord-Connector#license)
-[![Author: Senjin the Dragon](https://img.shields.io/badge/Author-Senjin_the_Dragon-gold.svg)](https://github.com/senjinthedragon)
+KuroHelper 的無 Discord Token AI 執行層。它將 SillyTavern、角色卡、OpenRouter、長期記憶與無頭瀏覽器包在同一組 Compose 服務中，並透過帶共享密鑰的 WebSocket API 接受 `kurohelper` 呼叫。
 
-Bridge your SillyTavern character to Discord for real-time roleplay. Messages sent in a Discord channel are routed through SillyTavern's AI pipeline and responded to as your active character, with full streaming, image and expression support.
+這個專案源自 SillyTavern Discord Connector；原作者與授權資訊保留在程式檔頭及 `LICENSE`。Discord Gateway、頻道讀取、指令權限和訊息發送已移至 Go 專案。
 
-Most people set this up on their own private Discord server and keep it to themselves - and that works perfectly. But you can also invite a small group of trusted friends and chat together around the same character, like a campfire where the character actually talks back. Everyone shares the same story and the same character; each person can set their own persona so the character knows who they are. Just keep in mind it's not designed for large groups where everyone wants a completely private session with their own separate chat history - it's a shared experience by design.
+## 專案分工
 
-<p><em>This is an independent extension for SillyTavern and is not affiliated with the SillyTavern development team</em></p>
-
-<table align="center"><tr valign="top">
-  <td width="65%"><img src="https://raw.githubusercontent.com/senjinthedragon/SillyTavern-Discord-Connector/main/assets/SillyTavern-Discord-Bridge_1.webp" width="100%" alt="Desktop Discord chat session with images"></td>
-  <td width="35%"><img src="https://raw.githubusercontent.com/senjinthedragon/SillyTavern-Discord-Connector/main/assets/SillyTavern-Discord-Bridge_2.webp" width="100%" alt="Mobile Discord showing group chat and /charimage autocomplete"></td>
-</tr></table>
-
-## ☕ Support the Developer
-
-I am a solo developer building this bridge to make mobile RP better for the community. I maintain this project in my free time, and as I'm currently navigating some financial challenges, any support is deeply appreciated.
-
-If this extension adds value to your roleplay experience, please consider:
-
-* **[Sponsoring me on GitHub](https://github.com/sponsors/senjinthedragon)**
-* **[Buying me a coffee on Ko-fi](https://ko-fi.com/senjinthedragon)**
-* **Bitcoin:** `bc1qjsaqw6rjcmhv6ywv2a97wfd4zxnae3ncrn8mf9`
-* **Starring this repository** to help others find it.
-
-## Requirements
-
-* [SillyTavern](https://github.com/SillyTavern/SillyTavern) (latest recommended)
-* [Node.js](https://nodejs.org/) v18 or higher
-* A Discord bot token with the **Message Content** [privileged intent](#2-create-your-discord-bot) enabled
-* A Discord server with a channel where you want to send messages. You can set this up yourself, for free, with Discord. It's at the bottom of your server list, **Add a Server** (the little icon with a + sign)
-* (optional) If you want to use the `/image` command to ai generate images, the `Image Generation` extension that comes with SillyTavern needs to be set up correctly and be working.
-* (optional) The same goes for expressions, your `Character Expressions` extension needs to be set up correctly and be working if you want those to be sent to Discord.
-
-## Quick Start
-
-For a 24/7 container deployment with the official SillyTavern image and a
-headless browser worker, see **[Docker Compose deployment](DEPLOYMENT.md)**.
-
-*Note for Mobile/Android Users: You only need to perform these steps on the computer running your SillyTavern server. Once the bridge is running, you can chat from your phone using the standard Discord app.*
-
-**Don't worry about all the scary instructions. If you follow them step by step, you should be able to get started in a few minutes.**
-
-### 1. Install the extension
-
-* In SillyTavern → **Extensions** menu (The stack of cubes) → **Install extension**
-* Paste: `https://github.com/senjinthedragon/SillyTavern-Discord-Connector`
-* Click **Install for all users** or **Install just for me**.
-
-The **Discord Connector Settings** should now appear in your extensions list.
-
-### 2. Create your Discord bot
-
-* Go to [Discord Developer Portal](https://discord.com/developers/applications)
-* Click **New Application**, give it a name (`SillyTavern Bridge` for example), check the box and click **Create**
-* Go to the **Bot** tab:
-  * Customize your bot. You can give it an **Icon**, **Banner** and **Username**
-  * **Reset**/**Copy** your Token and store it somewhere safe. (The long line of random letters and numbers)
-  * Under **Privileged Gateway Intents**, enable **Message Content Intent**
-* Go to the **OAuth2** tab:
-  * Under **OAuth2 URL generator**:
-    * **Scopes**: `bot`, `applications.commands`
-    * **Bot Permissions**: `Send Messages`, `Read Message History`, `Manage Messages`[^1]
-    * Leave **Integration Type** set to **Guild Install**
-    * Copy the **Generated URL** and open it with a browser to invite your bot to your Discord server
-
-[^1]: `Manage Messages` is used to delete the streaming message and repost it cleanly.
-
-### 3. Configure the SillyTavern Bridge Server
-
-These folders and files can be found in the server folder of your SillyTavern extension which you can commonly find in the following locations:
-
-* **Windows**: [Your SillyTavern Folder]\data\default-user\extensions\SillyTavern-Discord-Connector\server
-* **Linux/Mac**: ~/.local/share/sillytavern/default-user/extensions/SillyTavern-Discord-Connector/server
-* **Docker**: /home/node/app/data/default-user/extensions/SillyTavern-Discord-Connector/server
-
-**Windows**:\
-Copy or rename `config.example.js` to `config.js`
-
-**Linux/Mac**:
-
-```shell
-cp config.example.js config.js
+```text
+KuroHelper/
+├─ kurohelper/             Discord Bot 入口、事件與 slash command
+├─ kurohelper-service/     可重用的 Kuro runtime client、上下文組裝、資料模型
+└─ kurohelper-ai-runtime/  SillyTavern、生成流程、Persona、長期記憶
 ```
 
-**Both**:\
-Edit `config.js` and change these lines:
+請求流程：
 
-```javascript
-discordToken: 'YOUR_BOT_TOKEN_HERE', // The one you copied to a safe place in part 2
-allowedUserIds: [], // add your Discord User ID here to keep the bot private to yourself
-allowedChannelIds: [], // (optional) restrict the bot to specific channels only
+```text
+Discord
+  -> kurohelper (Bot Token、觸發與最近訊息)
+  -> kurohelper-service/kuro (內部協定 client)
+  -> kurohelper-ai-runtime:2334 (共享密鑰)
+  -> SillyTavern extension:2333
+  -> OpenRouter
+  -> 最終文字沿原路回到 Discord
 ```
 
-You can change the other lines in the `config.js` as well, but the ones listed above are the important ones.
+AI Runtime 不登入 Discord，也不保存 Discord Bot Token。它只接收 Go Bot 已整理好的使用者 ID、顯示名稱、當前問題與最近頻道上下文。
 
-> [!TIP]
-> To get a Discord User ID: enable Developer Mode in Discord settings, then right-click a user and select **Copy User ID**.\
-> \
-> To get a Discord Channel ID: enable Developer Mode in Discord settings, then right-click a channel and select **Copy Channel ID**.\
-> \
-> To enable **Developer Mode**: Discord settings → ...Advanced → Developer Mode\
-> \
-> You can copy and rename the server folder to wherever you like for convenience. Do mind that the original must stay in the extension folder - the extension needs it to load its translations. If you move it out entirely rather than copying it, the settings panel will lose its translations. Copies won't be updated automatically when the extension updates, so you will need to re-copy after updates.
+## 容器
 
-> [!CAUTION]
-> SECURITY WARNING: If you leave `allowedUserIds` empty, the bot is public.\
-> ANYONE who finds your bot on Discord can trigger generations on your SillyTavern server.\
-> It is highly recommended to add your own user ID to `allowedUserIds` before sharing your bot invite link with anyone.
+- `sillytavern`：SillyTavern 網頁與生成設定，主機僅開放 `127.0.0.1:8000`。
+- `browser-worker`：以 Playwright 開啟 SillyTavern，維持瀏覽器端擴充功能運行。
+- `ai-runtime`：連接瀏覽器端擴充功能，並在主機 `127.0.0.1:2334` 提供 KuroHelper API。
+- `memory-service`：事件型長期記憶、SQLite/向量檢索、分類權重、軟刪除與生命週期維護。記憶以事件或陳述為主體，Discord 使用者只作為參與者中繼資料。
+- `character-seed`：將角色卡同步進 SillyTavern data volume。
 
-### 4. Start the bridge server
+長期記憶分為 `conversation_event`、`user_preference`、`plan_task`、`relationship_milestone`、`decision` 與 `summary`。預設只在來源頻道回想；只有高重要度的共同決定或階段摘要可以跨頻道。使用者偏好必須由當事人在本次訊息中明確表達，Kuro 的身分與偏好由角色卡負責，不會從助手回覆寫入記憶。
 
-**Windows**:\
-Run `start-bridge.bat` from the server folder. It installs dependencies and starts the server automatically.
+## 設定與啟動
 
-**Linux/macOS**:\
-Run `start-bridge.sh` from the server folder. Make it executable once with `chmod +x start-bridge.sh`, then launch it with `./start-bridge.sh`.
+1. 將 `.env.example` 複製為 `.env`。
+2. 填入 `OPENROUTER_API_KEY`、`OPENROUTER_MODEL` 與角色卡路徑。
+3. 執行 `npm run configure-runtime-secret`，安全產生長隨機字串並同步寫入本專案 `.env` 與 `kurohelper/.env`；腳本不會把密鑰印到終端。
+4. 確認 `server/config.js` 存在；可由 `server/config.example.js` 複製。這裡不應出現 Discord Token。
+5. 啟動：
 
-**Both**:\
-This will run the Bridge Server required to make Discord and SillyTavern talk to each other. You need to run the server every time and **keep this window open** for it to work.
+```powershell
+docker compose up -d --build
+docker compose ps
+docker compose logs -f ai-runtime browser-worker memory-service
+```
 
-### 5. Connect the extension
+若使用 Podman，對應指令為 `podman compose up -d --build`。Windows 上需先啟動 Podman machine。
 
-* In SillyTavern, open the **Discord Connector** panel in the Extensions tab
-* Click **Connect** - or enable **Auto-connect** to connect on every page load
-* Start chatting in Discord to chat with the default character or use `switchchar` to select a different character from the list.
+接著在 `kurohelper/.env` 設定：
 
-## Commands
+```dotenv
+KURO_RUNTIME_URL=ws://127.0.0.1:2334
+KURO_RUNTIME_SECRET=與上面相同的長隨機字串
+KURO_TRIGGER_PREFIX=小黑
+KURO_CHANNEL_IDS=允許觸發的頻道ID
+KURO_COMMAND_USER_IDS=允許使用管理指令的使用者ID
+```
 
-The bridge supports a full set of slash commands for controlling characters, chats, personas, image generation and more. See the **[full command reference](COMMANDS.md)** for details.
+詳細部署與網路邊界見 [DEPLOYMENT.md](DEPLOYMENT.md)，內部封包格式見 [PROTOCOL.md](PROTOCOL.md)。
 
-Bot responses are available in 13 languages. Each user can set their own preference with `/setlang` and the bot will reply to them in that language, regardless of what anyone else has set.
+## 資料持久化
 
-## How It Works
+- `runtime/sillytavern/`：SillyTavern 設定、角色與聊天資料。
+- `runtime/browser/`：無頭瀏覽器 profile。
+- `runtime/runtime/`：Persona 對應等 AI Runtime 狀態。
+- `runtime/memory/`：長期記憶資料庫與向量索引。
 
-The extension runs inside SillyTavern's browser environment and connects to the bridge server. When a Discord message arrives, the server forwards it to SillyTavern, which generates a response using your active character and AI settings. The reply streams back through the bridge and updates in real time in Discord as the AI generates.
+這些目錄不會隨容器重建消失，且不應提交到 Git。
 
-When `/newchat` is used, the character's greeting is automatically forwarded to Discord. In group chats, each member's individual greeting is sent in turn. Any images embedded in a greeting come through as well.
+## 安全邊界
 
-Images that SillyTavern adds to a reply - whether generated automatically after a message or requested via `/image` - are detected and posted to Discord as attachments. Images that exceed Discord's upload limit are scaled down automatically before sending.
-
-## Troubleshooting
-
-**Bot doesn't respond:**\
-Check that the bridge server is running and the extension shows "Connected" in green.
-
-**Message Content Intent error:**\
-This intent must be explicitly enabled in the Discord Developer Portal under [your bot's settings](#2-create-your-discord-bot) - it is not on by default.
-
-**Port conflict:**\
-If port 2333 is in use, change `wssPort` in `config.js` and update the bridge URL in the [extension settings](#3-configure-the-sillytavern-bridge-server) to match.
-
-**Autocomplete shows "Loading options failed":**\
-This can happen if Discord has cached an old version of your slash commands. Simply restart your Discord app to force it to fetch the latest command definitions from the bot.
-
-**Slash commands don't appear in Discord:**\
-The [`applications.commands`](#2-create-your-discord-bot) scope must be included when generating the bot's invite URL.\
-If you invited the bot already, generate a new invite URL with the scope added and open it in a browser - you do not need to kick and re-invite the bot, visiting the new URL is enough to grant the missing scope. Slash commands can also take up to an hour to appear in Discord after the bridge first starts.
-
-## Pro Plugins
-
-Want to take your roleplay beyond Discord? **Telegram** and **Signal** plugins are available as a paid add-on, letting you chat with your SillyTavern character through those platforms using the same commands and features you already know.
-
-* **[Contact me to get the pro plugins](https://github.com/senjinthedragon)**
-
-These plugins run as independent modules on your bridge server. Each plugin comes with its own setup guide and is distributed under a proprietary license. Purchasing a pro plugin directly supports the continued development of this project!
-
-> **Note:** Unlike the Discord plugin, the Telegram and Signal plugins do not have a built-in user allow-list. They are designed for personal or small-group use where you control who has the phone number or bot link. If you expose them publicly, anyone who can reach your bot can send messages to your SillyTavern instance.
-
-## License
-
-This project is licensed under a split-license model to ensure compatibility with upstream requirements while keeping the core bridge open for everyone:
-
-* SillyTavern Extension (`/src` and root): Licensed under GNU AGPLv3 (see [LICENSE](LICENSE)).
-* Bridge Server (/server): Licensed under MIT (see [server/LICENSE](server/LICENSE)).
+- Discord Bot Token 只存在 `kurohelper/.env`。
+- OpenRouter API Key 只存在 AI Runtime 的 `.env`。
+- 2334 預設只綁定主機 loopback，並要求 Bearer secret。
+- 若 Go Bot 與 AI Runtime 分散在不同主機，請用私有網路、VPN 或 TLS 反向代理；不要直接把 2334 公開到 Internet。

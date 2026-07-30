@@ -17,7 +17,11 @@ notes/
 data/
 
 # Container deployment runtime and local overrides
-runtime/
+/runtime/
+/chroma/
+/lifecycle.sqlite3*
+**/__pycache__/
+*.py[cod]
 .env
 !.env.example
 deploy/browser/node_modules/
