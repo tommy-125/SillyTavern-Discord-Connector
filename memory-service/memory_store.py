@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +34,10 @@ LEGACY_CATEGORY_MAP = {
     "relationship": "relationship_milestone",
 }
 
+BACKUP_ID_PATTERN = re.compile(
+    r"^(?P<timestamp>\d{8}T\d{6}Z)-(?P<reason>auto|manual|startup|pre-restore)-(?P<suffix>[0-9a-f]{8})$"
+)
+
 
 def _iso(value: datetime | None = None) -> str:
     return (value or utc_now()).isoformat()
@@ -58,11 +64,15 @@ class MemoryStore:
     ) -> None:
         root = Path(data_dir)
         root.mkdir(parents=True, exist_ok=True)
+        self._root = root
+        self._db_path = root / "lifecycle.sqlite3"
+        self._backup_dir = root / "backups"
+        self._backup_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._embed_documents = embed_documents
         self._embed_queries = embed_queries
         self._db = sqlite3.connect(
-            root / "lifecycle.sqlite3",
+            self._db_path,
             check_same_thread=False,
             timeout=30,
         )
@@ -83,6 +93,231 @@ class MemoryStore:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    @staticmethod
+    def _validate_backup_database(path: Path) -> None:
+        source = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            check = source.execute("PRAGMA quick_check").fetchone()
+            if check is None or check[0] != "ok":
+                raise ValueError("backup database failed SQLite quick_check")
+            table = source.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories'"
+            ).fetchone()
+            if table is None:
+                raise ValueError("backup database does not contain the memories table")
+        finally:
+            source.close()
+
+    def _backup_info(self, path: Path) -> dict[str, Any]:
+        match = BACKUP_ID_PATTERN.fullmatch(path.stem)
+        if match is None:
+            raise ValueError("invalid backup filename")
+        counts: dict[str, int] = {}
+        source = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            rows = source.execute(
+                "SELECT status, COUNT(*) FROM memories GROUP BY status"
+            ).fetchall()
+            counts = {str(status): int(count) for status, count in rows}
+        finally:
+            source.close()
+        timestamp = datetime.strptime(
+            match.group("timestamp"), "%Y%m%dT%H%M%SZ"
+        ).replace(tzinfo=timezone.utc)
+        return {
+            "id": path.stem,
+            "created_at": timestamp.isoformat(),
+            "reason": match.group("reason"),
+            "size_bytes": path.stat().st_size,
+            "memory_count": sum(counts.values()),
+            "status_counts": counts,
+        }
+
+    def _backup_paths(self) -> list[Path]:
+        return sorted(
+            (
+                path
+                for path in self._backup_dir.glob("*.sqlite3")
+                if BACKUP_ID_PATTERN.fullmatch(path.stem)
+            ),
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+
+    def _prune_backups_locked(self, retention_count: int) -> int:
+        keep = max(2, min(int(retention_count), 365))
+        removed = 0
+        for path in self._backup_paths()[keep:]:
+            path.unlink(missing_ok=True)
+            removed += 1
+        return removed
+
+    def _create_backup_locked(
+        self,
+        reason: str,
+        retention_count: int,
+        prune: bool = True,
+    ) -> dict[str, Any]:
+        normalized_reason = reason if reason in {
+            "auto", "manual", "startup", "pre-restore"
+        } else "manual"
+        timestamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
+        backup_id = f"{timestamp}-{normalized_reason}-{uuid.uuid4().hex[:8]}"
+        destination = self._backup_dir / f"{backup_id}.sqlite3"
+        temporary = self._backup_dir / f".{backup_id}.tmp"
+        self._db.commit()
+        try:
+            target = sqlite3.connect(temporary)
+            try:
+                self._db.backup(target)
+                check = target.execute("PRAGMA quick_check").fetchone()
+                if check is None or check[0] != "ok":
+                    raise RuntimeError("new backup failed SQLite quick_check")
+            finally:
+                target.close()
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        temporary.replace(destination)
+        info = self._backup_info(destination)
+        removed = self._prune_backups_locked(retention_count) if prune else 0
+        info["pruned"] = removed
+        return info
+
+    def create_backup(
+        self,
+        reason: str = "manual",
+        retention_count: int = 30,
+    ) -> dict[str, Any]:
+        """Creates an online SQLite snapshot without pausing memory readers."""
+
+        with self._lock:
+            return self._create_backup_locked(reason, retention_count)
+
+    def seconds_until_next_backup(self, interval_seconds: int) -> int:
+        """Returns the remaining delay based on the newest snapshot of any kind."""
+
+        with self._lock:
+            paths = self._backup_paths()
+            if not paths:
+                return 0
+            age = max(0, time.time() - paths[0].stat().st_mtime)
+            return max(0, int(interval_seconds - age))
+
+    def create_backup_if_stale(
+        self,
+        reason: str,
+        minimum_age_seconds: int,
+        retention_count: int = 30,
+    ) -> dict[str, Any]:
+        """Creates a snapshot only when no recent snapshot already covers startup."""
+
+        with self._lock:
+            remaining = self.seconds_until_next_backup(minimum_age_seconds)
+            if remaining > 0:
+                latest = self._backup_info(self._backup_paths()[0])
+                return {
+                    "status": "skipped_recent",
+                    "backup": latest,
+                    "seconds_until_next": remaining,
+                }
+            return {
+                "status": "created",
+                "backup": self._create_backup_locked(reason, retention_count),
+                "seconds_until_next": max(1, int(minimum_age_seconds)),
+            }
+
+    def list_backups(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        with self._lock:
+            paths = self._backup_paths()
+            start = max(0, int(offset))
+            selected = paths[start : start + max(1, min(int(limit), 50))]
+            return [self._backup_info(path) for path in selected], len(paths)
+
+    def _resolve_backup_path_locked(self, backup_id: str) -> tuple[Path | None, bool]:
+        prefix = str(backup_id or "").strip()
+        if len(prefix) < 8 or not re.fullmatch(r"[A-Za-z0-9-]+", prefix):
+            return None, False
+        matches = [path for path in self._backup_paths() if path.stem.startswith(prefix)]
+        return (matches[0], False) if len(matches) == 1 else (None, len(matches) > 1)
+
+    def _rebuild_vector_index_locked(self) -> int:
+        existing = self._collection.get()
+        existing_ids = list(existing.get("ids") or [])
+        if existing_ids:
+            self._collection.delete(ids=existing_ids)
+        rows = self._db.execute(
+            "SELECT * FROM memories WHERE status = 'active' ORDER BY created_at"
+        ).fetchall()
+        for start in range(0, len(rows), 32):
+            chunk = rows[start : start + 32]
+            documents = [
+                self._document(
+                    row["memory_key"],
+                    row["memory_value"],
+                    row["subject_name"],
+                    self._row(row)["participants"],
+                )
+                for row in chunk
+            ]
+            self._collection.upsert(
+                ids=[row["id"] for row in chunk],
+                documents=documents,
+                embeddings=self._embed_documents(documents),
+                metadatas=[self._metadata(row) for row in chunk],
+            )
+        return len(rows)
+
+    def _load_backup_locked(self, path: Path) -> int:
+        self._validate_backup_database(path)
+        source = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        try:
+            self._db.commit()
+            source.backup(self._db)
+        finally:
+            source.close()
+        check = self._db.execute("PRAGMA quick_check").fetchone()
+        if check is None or check[0] != "ok":
+            raise RuntimeError("restored database failed SQLite quick_check")
+        self._create_schema()
+        return self._rebuild_vector_index_locked()
+
+    def restore_backup(
+        self,
+        backup_id: str,
+        retention_count: int = 30,
+    ) -> dict[str, Any]:
+        """Restores the whole memory database and rebuilds its derived vector index."""
+
+        with self._lock:
+            selected, ambiguous = self._resolve_backup_path_locked(backup_id)
+            if ambiguous:
+                return {"status": "ambiguous"}
+            if selected is None:
+                return {"status": "not_found"}
+            self._validate_backup_database(selected)
+            selected_info = self._backup_info(selected)
+            safety = self._create_backup_locked(
+                "pre-restore", retention_count, prune=False
+            )
+            safety_path = self._backup_dir / f"{safety['id']}.sqlite3"
+            try:
+                restored_count = self._load_backup_locked(selected)
+            except Exception:
+                self._load_backup_locked(safety_path)
+                raise
+            self._prune_backups_locked(retention_count)
+            return {
+                "status": "restored_backup",
+                "backup": selected_info,
+                "safety_backup": safety,
+                "restored_active_count": restored_count,
+            }
 
     def _create_schema(self) -> None:
         self._db.executescript(

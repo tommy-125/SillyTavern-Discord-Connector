@@ -2,6 +2,7 @@
 
 const { createHash } = require("node:crypto");
 const fs = require("node:fs/promises");
+const http = require("node:http");
 const path = require("node:path");
 const { chromium } = require("playwright");
 
@@ -17,14 +18,28 @@ const WATCH_INTERVAL_MS = positiveInt(
   process.env.CONNECTOR_WATCH_INTERVAL_MS,
   15_000,
 );
+const UI_READY_ATTEMPT_MS = positiveInt(
+  process.env.CONNECTOR_UI_READY_ATTEMPT_MS,
+  20_000,
+);
+const HEALTH_PORT = positiveInt(process.env.BROWSER_HEALTH_PORT, 8082);
+const HEALTH_STALE_MS = Math.max(WATCH_INTERVAL_MS * 3, 45_000);
+const UI_READY_ATTEMPTS = 3;
+const SESSION_FAILURE_LIMIT = 3;
 const BASIC_AUTH_USERNAME = process.env.ST_BASIC_AUTH_USERNAME || "";
 const BASIC_AUTH_PASSWORD = process.env.ST_BASIC_AUTH_PASSWORD || "";
 const OPENROUTER_MODEL = (process.env.OPENROUTER_MODEL || "").trim();
+const OPENROUTER_PROXY_URL = (process.env.OPENROUTER_PROXY_URL || "").trim();
 const OPENROUTER_REASONING_EFFORT = (
-  process.env.OPENROUTER_REASONING_EFFORT || "none"
+  process.env.OPENROUTER_REASONING_EFFORT || "auto"
 )
   .trim()
   .toLowerCase();
+const OPENROUTER_SHOW_THOUGHTS = booleanFlag(
+  process.env.OPENROUTER_SHOW_THOUGHTS,
+  false,
+  "OPENROUTER_SHOW_THOUGHTS",
+);
 const DEFAULT_CHARACTER = (process.env.ST_DEFAULT_CHARACTER || "").trim();
 const DEFAULT_PERSONA = (process.env.ST_DEFAULT_PERSONA || "User").trim();
 const UI_LANGUAGE = (process.env.ST_UI_LANGUAGE || "en").trim();
@@ -34,6 +49,15 @@ const PROMPT_SNAPSHOT_PATH = (
 const PROMPT_SNAPSHOT_TEST_MESSAGE = (
   process.env.CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE || ""
 ).trim();
+const PROMPT_SNAPSHOT_DISPLAY_NAME = (
+  process.env.CONNECTOR_PROMPT_SNAPSHOT_DISPLAY_NAME || DEFAULT_PERSONA
+).trim();
+const PROMPT_SNAPSHOT_RECENT_CONTEXT = (
+  process.env.CONNECTOR_PROMPT_SNAPSHOT_RECENT_CONTEXT || ""
+).trim();
+const PROMPT_SNAPSHOT_MEMORY_CONTEXT = (
+  process.env.CONNECTOR_PROMPT_SNAPSHOT_MEMORY_CONTEXT || ""
+).trim();
 const OPENROUTER_KEY_MARKER = path.join(
   PROFILE_DIR,
   ".openrouter-key.sha256",
@@ -42,6 +66,16 @@ const OPENROUTER_KEY_MARKER = path.join(
 let shuttingDown = false;
 let activeContext = null;
 let openRouterApiKey = "";
+let healthServer = null;
+let consecutiveSessionFailures = 0;
+const healthState = {
+  uiReady: false,
+  providerReady: false,
+  bridgeConnected: false,
+  lastProbeAt: 0,
+  lastError: "starting",
+  sessionStartedAt: 0,
+};
 
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(value || "", 10);
@@ -55,6 +89,54 @@ function log(level, message) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function setHealth(patch) {
+  Object.assign(healthState, patch);
+}
+
+function healthSnapshot() {
+  const probeAgeMs = healthState.lastProbeAt
+    ? Date.now() - healthState.lastProbeAt
+    : null;
+  const healthy = Boolean(
+    healthState.uiReady &&
+      healthState.providerReady &&
+      healthState.bridgeConnected &&
+      probeAgeMs != null &&
+      probeAgeMs <= HEALTH_STALE_MS,
+  );
+  return {
+    status: healthy ? "ok" : "unhealthy",
+    healthy,
+    model: OPENROUTER_MODEL,
+    uiReady: healthState.uiReady,
+    providerReady: healthState.providerReady,
+    bridgeConnected: healthState.bridgeConnected,
+    probeAgeMs,
+    lastError: healthState.lastError || null,
+    sessionStartedAt: healthState.sessionStartedAt || null,
+  };
+}
+
+function startHealthServer() {
+  const server = http.createServer((request, response) => {
+    if (request.method !== "GET" || request.url !== "/health") {
+      response.writeHead(404).end();
+      return;
+    }
+    const snapshot = healthSnapshot();
+    const body = JSON.stringify(snapshot);
+    response.writeHead(snapshot.healthy ? 200 : 503, {
+      "content-type": "application/json; charset=utf-8",
+      "content-length": Buffer.byteLength(body),
+    });
+    response.end(body);
+  });
+  server.listen(HEALTH_PORT, "0.0.0.0", () => {
+    log("info", `Health endpoint listening on 0.0.0.0:${HEALTH_PORT}`);
+  });
+  return server;
 }
 
 async function readOptionalFile(filePath) {
@@ -87,6 +169,14 @@ async function loadConfiguration() {
   }
 }
 
+function booleanFlag(value, fallback, name) {
+  if (value == null || String(value).trim() === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  throw new Error(`${name} must be true or false`);
+}
+
 async function configureOpenRouter(page) {
   await page.waitForSelector("#main_api", {
     state: "attached",
@@ -97,21 +187,25 @@ async function configureOpenRouter(page) {
     timeout: UI_TIMEOUT_MS,
   });
 
-  const keyHash = createHash("sha256").update(openRouterApiKey).digest("hex");
+  const providerSource = OPENROUTER_PROXY_URL ? "custom" : "openrouter";
+  const secretKey = OPENROUTER_PROXY_URL
+    ? "api_key_custom"
+    : "api_key_openrouter";
+  const keyHash = createHash("sha256")
+    .update(`${providerSource}\0${openRouterApiKey}`)
+    .digest("hex");
   const previousKeyHash = (await readOptionalFile(OPENROUTER_KEY_MARKER)).trim();
 
   const wroteSecret = await page.evaluate(
-    async ({ apiKey, shouldReplaceSecret }) => {
+    async ({ apiKey, shouldReplaceSecret, providerSource, secretKey, proxyUrl, model }) => {
       const secrets = await import("/scripts/secrets.js");
-      const secretExists = Boolean(
-        secrets.secret_state?.api_key_openrouter,
-      );
+      const secretExists = Boolean(secrets.secret_state?.[secretKey]);
 
       if (shouldReplaceSecret || !secretExists) {
         const id = await secrets.writeSecret(
-          "api_key_openrouter",
+          secretKey,
           apiKey,
-          "Docker OpenRouter key",
+          "Docker AI provider key",
         );
         if (!id) throw new Error("SillyTavern rejected the OpenRouter API key");
       }
@@ -128,8 +222,20 @@ async function configureOpenRouter(page) {
       if (mainApi.value !== "openai") {
         globalThis.jQuery(mainApi).val("openai").trigger("change");
       }
-      if (source.value !== "openrouter") {
-        globalThis.jQuery(source).val("openrouter").trigger("change");
+      if (source.value !== providerSource) {
+        globalThis.jQuery(source).val(providerSource).trigger("change");
+      }
+      if (providerSource === "custom") {
+        const urlInput = document.querySelector("#custom_api_url_text");
+        const modelInput = document.querySelector("#custom_model_id");
+        if (!(urlInput instanceof HTMLInputElement)) {
+          throw new Error("SillyTavern custom API URL field is unavailable");
+        }
+        if (!(modelInput instanceof HTMLInputElement)) {
+          throw new Error("SillyTavern custom model field is unavailable");
+        }
+        globalThis.jQuery(urlInput).val(proxyUrl).trigger("input");
+        globalThis.jQuery(modelInput).val(model).trigger("input");
       }
 
       return shouldReplaceSecret || !secretExists;
@@ -137,6 +243,10 @@ async function configureOpenRouter(page) {
     {
       apiKey: openRouterApiKey,
       shouldReplaceSecret: previousKeyHash !== keyHash,
+      providerSource,
+      secretKey,
+      proxyUrl: OPENROUTER_PROXY_URL,
+      model: OPENROUTER_MODEL,
     },
   );
 
@@ -147,7 +257,7 @@ async function configureOpenRouter(page) {
     });
   }
 
-  try {
+  if (providerSource === "openrouter") try {
     await page.waitForFunction(
       (model) =>
         Array.from(
@@ -175,19 +285,25 @@ async function configureOpenRouter(page) {
     );
   }
 
-  await page.evaluate((model) => {
-    const select = document.querySelector("#model_openrouter_select");
+  await page.evaluate(({ model, providerSource }) => {
+    const selector = providerSource === "custom"
+      ? "#model_custom_select"
+      : "#model_openrouter_select";
+    const select = document.querySelector(selector);
+    if (providerSource === "custom" && !(select instanceof HTMLSelectElement)) {
+      return;
+    }
     if (!(select instanceof HTMLSelectElement)) {
       throw new Error("SillyTavern OpenRouter model selector is unavailable");
     }
-    globalThis.jQuery(select).val(model).trigger("change");
-  }, OPENROUTER_MODEL);
+    if (Array.from(select.options).some((option) => option.value === model)) {
+      globalThis.jQuery(select).val(model).trigger("change");
+    }
+  }, { model: OPENROUTER_MODEL, providerSource });
 
-  // SillyTavern 1.18 maps "thoughts off + minimum effort" to OpenRouter's
-  // reasoning.effort="none". Keep this deterministic on every container start
-  // so simple roleplay replies do not intermittently spend seconds on hidden
-  // reasoning before any visible text is produced.
-  await page.evaluate((reasoningEffort) => {
+  // SillyTavern maps "auto" to an omitted reasoning effort, which lets the
+  // selected model use its own default. Other values remain explicit overrides.
+  await page.evaluate(({ reasoningEffort, showThoughts }) => {
     const thoughts = document.querySelector("#openai_show_thoughts");
     const effort = document.querySelector("#openai_reasoning_effort");
     if (!(thoughts instanceof HTMLInputElement)) {
@@ -199,13 +315,19 @@ async function configureOpenRouter(page) {
 
     const disabled = reasoningEffort === "none";
     const uiEffort = disabled ? "min" : reasoningEffort;
-    if (thoughts.checked === disabled) {
-      globalThis.jQuery(thoughts).prop("checked", !disabled).trigger("input");
+    const shouldShowThoughts = showThoughts && !disabled;
+    if (thoughts.checked !== shouldShowThoughts) {
+      globalThis.jQuery(thoughts)
+        .prop("checked", shouldShowThoughts)
+        .trigger("input");
     }
     if (effort.value !== uiEffort) {
       globalThis.jQuery(effort).val(uiEffort).trigger("input");
     }
-  }, OPENROUTER_REASONING_EFFORT);
+  }, {
+    reasoningEffort: OPENROUTER_REASONING_EFFORT,
+    showThoughts: OPENROUTER_SHOW_THOUGHTS,
+  });
 
   await page.waitForFunction(
     () => {
@@ -235,12 +357,12 @@ async function configureOpenRouter(page) {
     if (onlineStatus === "no_connection") await delay(500);
   }
   if (onlineStatus === "no_connection") {
-    throw new Error("SillyTavern did not connect to OpenRouter in time");
+    throw new Error("SillyTavern did not connect to the AI provider in time");
   }
 
   log(
     "info",
-    `OpenRouter is ready with model ${OPENROUTER_MODEL}; reasoning ${OPENROUTER_REASONING_EFFORT}`,
+    `OpenRouter is ready with model ${OPENROUTER_MODEL}; reasoning ${OPENROUTER_REASONING_EFFORT}; thoughts ${OPENROUTER_SHOW_THOUGHTS ? "on" : "off"}; metrics ${OPENROUTER_PROXY_URL ? "enabled" : "disabled"}`,
   );
 }
 
@@ -272,7 +394,7 @@ async function selectDefaultCharacter(page) {
   log("info", `Selected SillyTavern character ${DEFAULT_CHARACTER}`);
 }
 
-async function completeOnboarding(page) {
+async function completeOnboarding(page, timeout = UI_TIMEOUT_MS) {
   await page.waitForFunction(
     () => {
       const onboarding = document.querySelector("dialog.popup[open] .onboarding");
@@ -285,7 +407,7 @@ async function completeOnboarding(page) {
       );
     },
     undefined,
-    { timeout: UI_TIMEOUT_MS },
+    { timeout },
   );
 
   const onboarding = page.locator("dialog.popup[open] .onboarding");
@@ -294,7 +416,7 @@ async function completeOnboarding(page) {
   const popup = onboarding.locator("xpath=ancestor::dialog");
   await popup.locator(".popup-input").fill(DEFAULT_PERSONA || "User");
   await popup.locator(".popup-button-ok").click();
-  await onboarding.waitFor({ state: "hidden", timeout: UI_TIMEOUT_MS });
+  await onboarding.waitFor({ state: "hidden", timeout });
 
   log("info", `Completed SillyTavern onboarding as ${DEFAULT_PERSONA || "User"}`);
 }
@@ -304,6 +426,12 @@ async function connectorIsConnected(page) {
     const status = document.querySelector("#discord_connection_status");
     return Boolean(status && status.style.color === "green");
   });
+}
+
+async function providerIsConnected(page) {
+  return page.evaluate(
+    async () => (await import("/script.js")).online_status !== "no_connection",
+  );
 }
 
 async function connectExtension(page) {
@@ -340,19 +468,65 @@ async function connectExtension(page) {
 async function capturePromptSnapshot(page) {
   if (!PROMPT_SNAPSHOT_PATH) return;
 
-  const snapshot = await page.evaluate(async (testMessage) => {
+  const snapshot = await page.evaluate(async (input) => {
     const sillyTavern = await import("/script.js");
-    const insertedTestMessage = Boolean(testMessage);
+    const { buildRequestContextPrompt } = await import(
+      "/scripts/extensions/third-party/KuroHelper-AI-Runtime/src/request-context.mjs"
+    );
+    const { buildBudgetedDynamicContexts } = await import(
+      "/scripts/extensions/third-party/KuroHelper-AI-Runtime/src/prompt-budget.mjs"
+    );
+    const { suppressPreviousChatMessages } = await import(
+      "/scripts/extensions/third-party/KuroHelper-AI-Runtime/src/prompt-history.mjs"
+    );
+    const promptKeys = {
+      request: "discord_connector_request_context",
+      recent: "discord_connector_recent_channel_context",
+      memory: "discord_connector_long_term_memory",
+    };
+    const promptOptions = [
+      sillyTavern.extension_prompt_types.IN_CHAT,
+      1,
+      false,
+      sillyTavern.extension_prompt_roles.SYSTEM,
+    ];
+    const insertedTestMessage = Boolean(input.testMessage);
     if (insertedTestMessage) {
       sillyTavern.chat.push({
-        name: sillyTavern.name1 || "User",
+        name: input.displayName || sillyTavern.name1 || "User",
         is_user: true,
         is_system: false,
         send_date: new Date().toISOString(),
-        mes: testMessage,
+        mes: input.testMessage,
         extra: { prompt_snapshot_only: true },
       });
     }
+
+    const restoreHistory = suppressPreviousChatMessages(
+      sillyTavern.chat,
+      sillyTavern.symbols?.ignore ?? Symbol.for("ignore"),
+    );
+    const dynamicContexts = buildBudgetedDynamicContexts({
+      recentChannelContext: input.recentChannelContext,
+      memoryContext: input.memoryContext,
+      recentTokenBudget: input.recentTokenBudget,
+      memoryTokenBudget: input.memoryTokenBudget,
+    });
+    sillyTavern.setExtensionPrompt(
+      promptKeys.request,
+      buildRequestContextPrompt({ displayName: input.displayName }),
+      ...promptOptions,
+    );
+    sillyTavern.setExtensionPrompt(
+      promptKeys.recent,
+      dynamicContexts.recentChannelContext,
+      ...promptOptions,
+    );
+    sillyTavern.setExtensionPrompt(
+      promptKeys.memory,
+      dynamicContexts.memoryContext,
+      ...promptOptions,
+    );
 
     const captured = new Promise((resolve, reject) => {
       const timeout = setTimeout(
@@ -378,9 +552,20 @@ async function capturePromptSnapshot(page) {
       await sillyTavern.Generate("normal", {}, true);
       return await captured;
     } finally {
+      restoreHistory();
+      for (const key of Object.values(promptKeys)) {
+        sillyTavern.setExtensionPrompt(key, "", ...promptOptions);
+      }
       if (insertedTestMessage) sillyTavern.chat.pop();
     }
-  }, PROMPT_SNAPSHOT_TEST_MESSAGE);
+  }, {
+    testMessage: PROMPT_SNAPSHOT_TEST_MESSAGE,
+    displayName: PROMPT_SNAPSHOT_DISPLAY_NAME,
+    recentChannelContext: PROMPT_SNAPSHOT_RECENT_CONTEXT,
+    memoryContext: PROMPT_SNAPSHOT_MEMORY_CONTEXT,
+    recentTokenBudget: 500,
+    memoryTokenBudget: 400,
+  });
 
   await fs.mkdir(path.dirname(PROMPT_SNAPSHOT_PATH), { recursive: true });
   await fs.writeFile(
@@ -390,6 +575,9 @@ async function capturePromptSnapshot(page) {
         capturedAt: new Date().toISOString(),
         source: "SillyTavern Generate(normal, {}, true)",
         testMessage: PROMPT_SNAPSHOT_TEST_MESSAGE || null,
+        displayName: PROMPT_SNAPSHOT_DISPLAY_NAME || null,
+        recentChannelContext: PROMPT_SNAPSHOT_RECENT_CONTEXT || null,
+        memoryContext: PROMPT_SNAPSHOT_MEMORY_CONTEXT || null,
         messages: snapshot,
       },
       null,
@@ -401,26 +589,73 @@ async function capturePromptSnapshot(page) {
 }
 
 async function openSillyTavern(page) {
-  log("info", `Opening ${ST_URL}`);
-  await page.goto(ST_URL, {
-    // A restored SillyTavern profile can keep DOMContentLoaded pending while
-    // extensions restore their state. Continue once the server response is
-    // committed and use the explicit UI selectors below as readiness checks.
-    waitUntil: "commit",
-    timeout: UI_TIMEOUT_MS,
+  setHealth({
+    uiReady: false,
+    providerReady: false,
+    bridgeConnected: false,
+    lastProbeAt: 0,
   });
-  log("info", "SillyTavern navigation committed; waiting for the UI");
-  await completeOnboarding(page);
-  // This UI is added only after SillyTavern has loaded its settings and
-  // initialized extensions, so it doubles as an application-ready signal.
-  await page.waitForSelector("#discord_bridge_url", {
-    state: "attached",
-    timeout: UI_TIMEOUT_MS,
-  });
-  await configureOpenRouter(page);
-  await selectDefaultCharacter(page);
-  await connectExtension(page);
-  await capturePromptSnapshot(page);
+
+  let uiError = null;
+  for (let attempt = 1; attempt <= UI_READY_ATTEMPTS; attempt += 1) {
+    try {
+      log("info", `Opening ${ST_URL} (UI attempt ${attempt}/${UI_READY_ATTEMPTS})`);
+      await page.goto(ST_URL, {
+        // A restored profile can leave extension initialization pending. Use a
+        // bounded attempt so a stale page is reloaded instead of blocking the
+        // worker for the full provider timeout.
+        waitUntil: "commit",
+        timeout: UI_READY_ATTEMPT_MS,
+      });
+      log("info", "SillyTavern navigation committed; waiting for the UI");
+      await completeOnboarding(page, UI_READY_ATTEMPT_MS);
+      // This control is injected by the connector extension only after the
+      // SillyTavern application and extension settings have initialized.
+      await page.waitForSelector("#discord_bridge_url", {
+        state: "attached",
+        timeout: UI_READY_ATTEMPT_MS,
+      });
+      setHealth({ uiReady: true, lastError: "" });
+      uiError = null;
+      break;
+    } catch (error) {
+      uiError = error;
+      setHealth({ lastError: `UI readiness failed: ${error.message}` });
+      log(
+        "warn",
+        `SillyTavern UI attempt ${attempt}/${UI_READY_ATTEMPTS} failed: ${error.message}`,
+      );
+      if (attempt < UI_READY_ATTEMPTS) {
+        await page
+          .goto("about:blank", { waitUntil: "commit", timeout: 5_000 })
+          .catch(() => {});
+        await delay(3_000);
+      }
+    }
+  }
+
+  if (uiError) {
+    throw new Error(
+      `SillyTavern UI did not become ready after ${UI_READY_ATTEMPTS} attempts`,
+      { cause: uiError },
+    );
+  }
+
+  try {
+    await configureOpenRouter(page);
+    setHealth({ providerReady: true });
+    await selectDefaultCharacter(page);
+    await connectExtension(page);
+    setHealth({
+      bridgeConnected: true,
+      lastProbeAt: Date.now(),
+      lastError: "",
+    });
+    await capturePromptSnapshot(page);
+  } catch (error) {
+    setHealth({ lastError: error.message });
+    throw error;
+  }
 }
 
 async function runBrowserSession() {
@@ -471,26 +706,56 @@ async function runBrowserSession() {
   );
   page.on("crash", () => log("error", "Chromium page crashed"));
 
+  setHealth({ sessionStartedAt: Date.now(), lastError: "starting session" });
   await openSillyTavern(page);
+  consecutiveSessionFailures = 0;
 
   while (!shuttingDown) {
     await delay(WATCH_INTERVAL_MS);
     if (page.isClosed()) throw new Error("SillyTavern page was closed");
 
-    if (!(await connectorIsConnected(page))) {
-      log("warn", "Connector disconnected; attempting to reconnect");
-      try {
-        await connectExtension(page);
-      } catch (error) {
-        log("warn", `Reconnect failed: ${error.message}; reloading page`);
-        await openSillyTavern(page);
+    try {
+      let providerReady = await providerIsConnected(page);
+      let bridgeConnected = await connectorIsConnected(page);
+      setHealth({
+        providerReady,
+        bridgeConnected,
+        lastProbeAt: Date.now(),
+      });
+
+      if (!providerReady) {
+        log("warn", "AI provider disconnected; attempting to reconnect");
+        await configureOpenRouter(page);
+        providerReady = true;
       }
+      if (!bridgeConnected) {
+        log("warn", "Connector disconnected; attempting to reconnect");
+        await connectExtension(page);
+        bridgeConnected = true;
+      }
+
+      setHealth({
+        uiReady: true,
+        providerReady,
+        bridgeConnected,
+        lastProbeAt: Date.now(),
+        lastError: "",
+      });
+    } catch (error) {
+      setHealth({
+        providerReady: false,
+        bridgeConnected: false,
+        lastError: `Readiness probe failed: ${error.message}`,
+      });
+      log("warn", `Readiness probe failed: ${error.message}; reloading page`);
+      await openSillyTavern(page);
     }
   }
 }
 
 async function main() {
   await loadConfiguration();
+  healthServer = startHealthServer();
   log("info", "Starting persistent headless Chromium session");
 
   while (!shuttingDown) {
@@ -498,6 +763,14 @@ async function main() {
       await runBrowserSession();
     } catch (error) {
       if (!shuttingDown) {
+        consecutiveSessionFailures += 1;
+        setHealth({
+          uiReady: false,
+          providerReady: false,
+          bridgeConnected: false,
+          lastProbeAt: 0,
+          lastError: error.message,
+        });
         log("error", `${error.stack || error.message}`);
       }
     } finally {
@@ -508,6 +781,18 @@ async function main() {
     }
 
     if (!shuttingDown) {
+      if (consecutiveSessionFailures >= SESSION_FAILURE_LIMIT) {
+        log(
+          "error",
+          `Browser session failed ${SESSION_FAILURE_LIMIT} consecutive times; exiting for container restart`,
+        );
+        if (healthServer) {
+          await new Promise((resolve) => healthServer.close(resolve));
+          healthServer = null;
+        }
+        process.exitCode = 1;
+        return;
+      }
       log("info", "Restarting browser session in 5 seconds");
       await delay(5_000);
     }
@@ -519,6 +804,10 @@ async function shutdown(signal) {
   shuttingDown = true;
   log("info", `Received ${signal}; shutting down`);
   if (activeContext) await activeContext.close().catch(() => {});
+  if (healthServer) {
+    await new Promise((resolve) => healthServer.close(resolve));
+    healthServer = null;
+  }
 }
 
 process.on("SIGTERM", () => void shutdown("SIGTERM"));

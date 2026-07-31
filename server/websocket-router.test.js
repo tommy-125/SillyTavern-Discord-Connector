@@ -76,6 +76,12 @@ function createDeps(overrides = {}) {
     },
     setCurrentPersonaName: () => {},
     setCrossRelayEnabled: () => {},
+    claimProviderMetrics: async () => ({
+      generationCount: 1,
+      usageAvailable: true,
+      totalTokens: 42,
+      costUsd: 0.001,
+    }),
     log: () => {},
     __calls: calls,
     __wsSent: sentByWs,

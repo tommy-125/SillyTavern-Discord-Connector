@@ -82,12 +82,15 @@ import { buildLastExchange, buildHistory, scheduleRecap } from './recap.js';
 import { looksLikePromptLeak } from './model-output-guard.mjs';
 import { formatDialogueOnly } from './dialogue-only.mjs';
 import { suppressPreviousChatMessages } from './prompt-history.mjs';
+import { buildRequestContextPrompt } from './request-context.mjs';
+import { buildBudgetedDynamicContexts } from './prompt-budget.mjs';
 
 // String fallback covers older ST versions that don't export this event type.
 const GROUP_WRAPPER_FINISHED =
   event_types.GROUP_WRAPPER_FINISHED ?? 'group_wrapper_finished';
 const MEMORY_PROMPT_KEY = 'discord_connector_long_term_memory';
 const RECENT_CHANNEL_PROMPT_KEY = 'discord_connector_recent_channel_context';
+const REQUEST_CONTEXT_PROMPT_KEY = 'discord_connector_request_context';
 
 // ---------------------------------------------------------------------------
 // Autocomplete cache
@@ -232,7 +235,7 @@ export function captureAndSendIntroMessage(chatId) {
  * All event listeners are registered here and removed in every exit path
  * (normal completion, user stop, error) to prevent leaks across sessions.
  */
-export async function handleUserMessage(data) {
+export async function handleUserMessage(data, { abortController = new AbortController() } = {}) {
   const latencyStartedAt = performance.now();
   const latencyLabel = String(data.requestId || 'unknown').slice(-8);
   const latencyParts = {};
@@ -470,7 +473,7 @@ export async function handleUserMessage(data) {
     };
   };
 
-  const collectAndSendReplies = () => {
+  const collectAndSendReplies = (metrics = null) => {
     if (!messageState.chatId) return;
     const aiMessages = getTrailingAiMessages();
 
@@ -488,6 +491,7 @@ export async function handleUserMessage(data) {
         userText: data.text,
         chatId: messageState.chatId,
         messages: aiMessages,
+        metrics,
       });
     } else if (!messageState.streamedAny) {
       // Only send the no-response error if streaming never delivered any text.
@@ -499,6 +503,7 @@ export async function handleUserMessage(data) {
         receivedAt: data.receivedAt,
         chatId: messageState.chatId,
         text: t('reply.noResponse'),
+        metrics: metrics ? { ...metrics, status: 'error' } : { status: 'error' },
       });
     }
 
@@ -576,27 +581,42 @@ export async function handleUserMessage(data) {
     stContext.symbols?.ignore ?? Symbol.for('ignore'),
   );
   try {
-    if (data.recentChannelContext) {
+    setExtensionPrompt(
+      REQUEST_CONTEXT_PROMPT_KEY,
+      buildRequestContextPrompt({
+        displayName: data.displayName || stContext.name1,
+      }),
+      extension_prompt_types.IN_CHAT,
+      1,
+      false,
+      extension_prompt_roles.SYSTEM,
+    );
+    const dynamicContexts = buildBudgetedDynamicContexts({
+      recentChannelContext: data.recentChannelContext,
+      memoryContext: data.memoryContext,
+      recentTokenBudget: sharedState.recentChannelTokenBudget,
+      memoryTokenBudget: sharedState.memoryTokenBudget,
+    });
+    if (dynamicContexts.recentChannelContext) {
       setExtensionPrompt(
         RECENT_CHANNEL_PROMPT_KEY,
-        String(data.recentChannelContext).slice(0, 8_000),
+        dynamicContexts.recentChannelContext,
         extension_prompt_types.IN_CHAT,
         1,
         false,
         extension_prompt_roles.SYSTEM,
       );
     }
-    if (data.memoryContext) {
+    if (dynamicContexts.memoryContext) {
       setExtensionPrompt(
         MEMORY_PROMPT_KEY,
-        String(data.memoryContext).slice(0, 8_000),
+        dynamicContexts.memoryContext,
         extension_prompt_types.IN_CHAT,
         1,
         false,
         extension_prompt_roles.SYSTEM,
       );
     }
-    const abortController = new AbortController();
     setExternalAbortController(abortController);
     stageStartedAt = performance.now();
     await Generate('normal', { signal: abortController.signal });
@@ -629,11 +649,26 @@ export async function handleUserMessage(data) {
       }
 
       removeAllListeners();
-      collectAndSendReplies();
       const totalMs = Math.round(performance.now() - latencyStartedAt);
       const endToEndMs = Number.isFinite(data.receivedAt)
         ? Date.now() - data.receivedAt
         : null;
+      const metrics = {
+        status: 'success',
+        browserQueueMs: Number(data.queueDelayMs) || 0,
+        memoryRecallMs: latencyParts.memoryRecall || 0,
+        localeMs: latencyParts.locale || 0,
+        personaMs: latencyParts.persona || 0,
+        injectUserMs: latencyParts.injectUser || 0,
+        generateMs: latencyParts.generate || 0,
+        validateMs: latencyParts.validate || 0,
+        retryGenerateMs: latencyParts.retryGenerate || 0,
+        retryValidateMs: latencyParts.retryValidate || 0,
+        browserTotalMs: totalMs,
+        endToEndBeforeDiscordMs: endToEndMs || 0,
+        retryCount: latencyParts.retryGenerate ? 1 : 0,
+      };
+      collectAndSendReplies(metrics);
       console.info(
         `[Discord Bridge][Latency ${latencyLabel}] completed; queue ${
           data.queueDelayMs ?? 0
@@ -653,11 +688,33 @@ export async function handleUserMessage(data) {
       text: t('reply.generationFailed', {
         message: error.message || 'Unknown',
       }),
+      metrics: {
+        status: 'error',
+        browserQueueMs: Number(data.queueDelayMs) || 0,
+        memoryRecallMs: latencyParts.memoryRecall || 0,
+        localeMs: latencyParts.locale || 0,
+        personaMs: latencyParts.persona || 0,
+        injectUserMs: latencyParts.injectUser || 0,
+        generateMs: latencyParts.generate || 0,
+        validateMs: latencyParts.validate || 0,
+        retryGenerateMs: latencyParts.retryGenerate || 0,
+        retryValidateMs: latencyParts.retryValidate || 0,
+        browserTotalMs: Math.round(performance.now() - latencyStartedAt),
+        retryCount: latencyParts.retryGenerate ? 1 : 0,
+      },
     });
     removeAllListeners();
     sendStreamEnd();
   } finally {
     restorePromptHistory();
+    setExtensionPrompt(
+      REQUEST_CONTEXT_PROMPT_KEY,
+      '',
+      extension_prompt_types.IN_CHAT,
+      1,
+      false,
+      extension_prompt_roles.SYSTEM,
+    );
     setExtensionPrompt(
       RECENT_CHANNEL_PROMPT_KEY,
       '',

@@ -1,13 +1,23 @@
 /**
  * Strict FIFO queue for operations that mutate SillyTavern's one active
- * frontend state. It intentionally has no timeout release: starting another
- * task while a stuck generation is still active would corrupt shared state.
+ * frontend state. A watchdog can abort a stuck task, but the queue does not
+ * release the next task until the aborted task has actually settled. If abort
+ * is ignored, the caller can reload the browser through onUnresponsive rather
+ * than allowing two generations to mutate SillyTavern concurrently.
  */
+export class GenerationQueueTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`Generation task timed out after ${timeoutMs} ms`);
+    this.name = 'GenerationQueueTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export function createGenerationQueue() {
   let tail = Promise.resolve();
   let pendingCount = 0;
 
-  function enqueue(task) {
+  function enqueue(task, options = {}) {
     if (typeof task !== 'function') {
       return Promise.reject(
         new TypeError('Generation queue task must be a function'),
@@ -16,9 +26,35 @@ export function createGenerationQueue() {
 
     pendingCount += 1;
     const result = tail.then(async () => {
+      const timeoutMs = Number(options.timeoutMs) || 0;
+      const unresponsiveGraceMs = Number(options.unresponsiveGraceMs) || 10_000;
+      const abortController = new AbortController();
+      let timeoutId = null;
+      let unresponsiveId = null;
+      let settled = false;
+
+      if (timeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          const error = new GenerationQueueTimeoutError(timeoutMs);
+          abortController.abort(error);
+          options.onTimeout?.(error);
+          if (typeof options.onUnresponsive === 'function') {
+            unresponsiveId = setTimeout(() => {
+              if (!settled) options.onUnresponsive(error);
+            }, unresponsiveGraceMs);
+          }
+        }, timeoutMs);
+      }
+
       try {
-        return await task();
+        return await task({
+          signal: abortController.signal,
+          abortController,
+        });
       } finally {
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        if (unresponsiveId) clearTimeout(unresponsiveId);
         pendingCount -= 1;
       }
     });
@@ -39,8 +75,8 @@ export function createGenerationQueue() {
 
 const globalGenerationQueue = createGenerationQueue();
 
-export const enqueueGenerationTask = (task) =>
-  globalGenerationQueue.enqueue(task);
+export const enqueueGenerationTask = (task, options) =>
+  globalGenerationQueue.enqueue(task, options);
 export const whenGenerationQueueIdle = () =>
   globalGenerationQueue.whenIdle();
 export const getGenerationQueueSize = () =>

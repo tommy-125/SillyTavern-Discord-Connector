@@ -27,6 +27,9 @@ class FakeCollection:
         for memory_id in ids:
             self.items.pop(memory_id, None)
 
+    def get(self):
+        return {"ids": list(self.items)}
+
     @staticmethod
     def _matches(metadata, where):
         if "$and" in where:
@@ -153,6 +156,44 @@ class MemoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(result["noop"], 1)
         self.assertEqual(self.store.list_memories("Kuro"), [])
+
+    def test_backup_restore_replaces_database_and_rebuilds_vectors(self):
+        self.store.apply_operations(
+            "Kuro", [self.preference("discord:u1", "肉圓", "肉圓喜歡紅豆冰棒。")], request_id="r1", channel_id="channel-1"
+        )
+        backup = self.store.create_backup("manual", retention_count=10)
+        self.store.apply_operations(
+            "Kuro", [self.preference("discord:u2", "海獺", "海獺喜歡巧克力冰棒。")], request_id="r2", channel_id="channel-1"
+        )
+
+        result = self.store.restore_backup(backup["id"], retention_count=10)
+
+        self.assertEqual(result["status"], "restored_backup")
+        self.assertEqual(result["restored_active_count"], 1)
+        memories = self.store.list_memories("Kuro")
+        self.assertEqual([item["memory_value"] for item in memories], ["肉圓喜歡紅豆冰棒。"])
+        self.assertEqual(len(FakeClient.collection.items), 1)
+        backups, count = self.store.list_backups()
+        self.assertEqual(count, 2)
+        self.assertEqual({item["reason"] for item in backups}, {"manual", "pre-restore"})
+
+    def test_backup_retention_keeps_latest_snapshots(self):
+        for _ in range(4):
+            self.store.create_backup("auto", retention_count=2)
+        backups, count = self.store.list_backups()
+        self.assertEqual(count, 2)
+        self.assertEqual(len(backups), 2)
+
+    def test_startup_backup_is_skipped_when_a_recent_snapshot_exists(self):
+        first = self.store.create_backup("manual", retention_count=5)
+        result = self.store.create_backup_if_stale("startup", 86400, retention_count=5)
+        backups, count = self.store.list_backups()
+
+        self.assertEqual(result["status"], "skipped_recent")
+        self.assertEqual(result["backup"]["id"], first["id"])
+        self.assertGreater(result["seconds_until_next"], 0)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(backups), 1)
 
 
 if __name__ == "__main__":

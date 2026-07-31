@@ -33,6 +33,7 @@ async function handleBridgePacket(data, deps) {
     setCurrentPersonaName,
     setCrossRelayEnabled,
     rememberTurn,
+    claimProviderMetrics,
     log,
   } = deps;
 
@@ -199,6 +200,11 @@ async function handleBridgePacket(data, deps) {
         break;
       }
 
+      const providerMetrics =
+        typeof claimProviderMetrics === "function"
+          ? await claimProviderMetrics(data.receivedAt)
+          : { generationCount: 0, usageAvailable: false };
+      const metrics = { ...(data.metrics || {}), ...providerMetrics };
       const messages =
         data?.messages || (data?.text ? [{ name: "", text: data.text }] : []);
       const deliverable = messages
@@ -217,6 +223,7 @@ async function handleBridgePacket(data, deps) {
             kind: "error",
             requestId: data.requestId || "",
             final: true,
+            metrics,
           },
         );
         break;
@@ -233,6 +240,7 @@ async function handleBridgePacket(data, deps) {
           kind: "ai_reply",
           requestId: data.requestId || "",
           final: index === deliverable.length - 1,
+          metrics,
         });
       }
       if (
@@ -261,14 +269,20 @@ async function handleBridgePacket(data, deps) {
     }
 
     case "error_message":
-    case "intro_message":
+    case "intro_message": {
+      const providerMetrics =
+        typeof claimProviderMetrics === "function"
+          ? await claimProviderMetrics(data.receivedAt)
+          : { generationCount: 0, usageAvailable: false };
       if (data?.text?.trim())
         await fanout(conversationId, "sendText", data.text.trim(), {
           kind: "error",
           requestId: data.requestId || "",
           final: true,
+          metrics: { ...(data.metrics || {}), ...providerMetrics },
         });
       break;
+    }
 
     case "recap_message":
       await fanout(

@@ -31,4 +31,7 @@ export const sharedState = {
   availableLanguages: null,
   streamResponses: false,
   dialogueOnlyResponses: false,
+  generationTimeoutMs: 60_000,
+  recentChannelTokenBudget: 500,
+  memoryTokenBudget: 400,
 };

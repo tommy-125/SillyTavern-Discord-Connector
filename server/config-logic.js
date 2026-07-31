@@ -28,8 +28,10 @@ function createConfig(rawConfig) {
   const config = {
     enabledPlugins: ["kurohelper"],
     wssPort: 2333,
-    queueTaskTimeoutSeconds: 30,
+    queueTaskTimeoutSeconds: 60,
     imagePlaceholderTimeoutSeconds: 180,
+    recentChannelTokenBudget: 500,
+    memoryTokenBudget: 400,
     streamResponses: false,
     dialogueOnlyResponses: false,
     ...rawConfig,
@@ -95,6 +97,12 @@ function createConfig(rawConfig) {
     throw new Error(
       "config.dialogueOnlyResponses requires streamResponses: false.",
     );
+  }
+
+  for (const key of ['recentChannelTokenBudget', 'memoryTokenBudget']) {
+    if (!Number.isInteger(config[key]) || config[key] <= 0) {
+      throw new Error(`config.${key} must be a positive integer token count.`);
+    }
   }
 
   for (const [platform, pluginCfg] of Object.entries(config.plugins || {})) {

@@ -44,6 +44,17 @@ TRASH_RETENTION_DAYS = max(
     1,
     min(3650, int(os.getenv("MEMORY_TRASH_RETENTION_DAYS", "30"))),
 )
+BACKUP_ENABLED = os.getenv("MEMORY_BACKUP_ENABLED", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+BACKUP_INTERVAL_SECONDS = max(
+    900,
+    int(os.getenv("MEMORY_BACKUP_INTERVAL_SECONDS", "86400")),
+)
+BACKUP_RETENTION_COUNT = max(
+    2,
+    min(365, int(os.getenv("MEMORY_BACKUP_RETENTION_COUNT", "5"))),
+)
 
 
 class RecallRequest(BaseModel):
@@ -93,10 +104,22 @@ class MemoryClearRequest(BaseModel):
     character_id: str = Field(min_length=1, max_length=80)
 
 
+class BackupListRequest(BaseModel):
+    character_id: str = Field(min_length=1, max_length=80)
+    limit: int = Field(default=20, ge=1, le=50)
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+
+
+class BackupRestoreRequest(BaseModel):
+    character_id: str = Field(min_length=1, max_length=80)
+    backup_id: str = Field(min_length=8, max_length=100)
+
+
 class Runtime:
     store: MemoryStore | None = None
     embedder: TextEmbedding | None = None
     maintenance_task: asyncio.Task | None = None
+    backup_task: asyncio.Task | None = None
 
 
 runtime = Runtime()
@@ -131,6 +154,32 @@ async def _maintenance_loop() -> None:
         await asyncio.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
 
+async def _backup_loop() -> None:
+    while True:
+        try:
+            if runtime.store is None:
+                await asyncio.sleep(60)
+                continue
+            delay = await asyncio.to_thread(
+                runtime.store.seconds_until_next_backup,
+                BACKUP_INTERVAL_SECONDS,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+                continue
+            backup = await asyncio.to_thread(
+                runtime.store.create_backup,
+                "auto",
+                BACKUP_RETENTION_COUNT,
+            )
+            logger.info("Automatic memory backup created: %s", backup["id"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Automatic memory backup failed")
+            await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Loading embedding model %s", EMBEDDING_MODEL)
@@ -146,6 +195,25 @@ async def lifespan(_: FastAPI):
         _embed_queries,
     )
     runtime.maintenance_task = asyncio.create_task(_maintenance_loop())
+    if BACKUP_ENABLED:
+        try:
+            startup_result = await asyncio.to_thread(
+                runtime.store.create_backup_if_stale,
+                "startup",
+                BACKUP_INTERVAL_SECONDS,
+                BACKUP_RETENTION_COUNT,
+            )
+            startup_backup = startup_result["backup"]
+            if startup_result["status"] == "created":
+                logger.info("Startup memory backup created: %s", startup_backup["id"])
+            else:
+                logger.info(
+                    "Startup memory backup skipped; recent snapshot %s is still fresh",
+                    startup_backup["id"],
+                )
+        except Exception:
+            logger.exception("Startup memory backup failed")
+        runtime.backup_task = asyncio.create_task(_backup_loop())
     logger.info("Memory service is ready")
     try:
         yield
@@ -154,6 +222,12 @@ async def lifespan(_: FastAPI):
             runtime.maintenance_task.cancel()
             try:
                 await runtime.maintenance_task
+            except asyncio.CancelledError:
+                pass
+        if runtime.backup_task:
+            runtime.backup_task.cancel()
+            try:
+                await runtime.backup_task
             except asyncio.CancelledError:
                 pass
         if runtime.store is not None:
@@ -213,6 +287,9 @@ async def health() -> dict[str, Any]:
         "extraction_model": OPENROUTER_MODEL,
         "stats": await asyncio.to_thread(store.stats),
         "trash_retention_days": TRASH_RETENTION_DAYS,
+        "backup_enabled": BACKUP_ENABLED,
+        "backup_interval_seconds": BACKUP_INTERVAL_SECONDS,
+        "backup_retention_count": BACKUP_RETENTION_COUNT,
     }
 
 
@@ -360,6 +437,48 @@ async def clear_managed_memories(request: MemoryClearRequest) -> dict[str, Any]:
         "count": count,
         "trash_retention_days": TRASH_RETENTION_DAYS,
     }
+
+
+@app.post("/v1/manage/backups")
+async def list_memory_backups(request: BackupListRequest) -> dict[str, Any]:
+    backups, count = await asyncio.to_thread(
+        _store().list_backups,
+        request.limit,
+        request.offset,
+    )
+    return {
+        "status": "ok",
+        "count": count,
+        "limit": request.limit,
+        "offset": request.offset,
+        "backup_retention_count": BACKUP_RETENTION_COUNT,
+        "backups": backups,
+    }
+
+
+@app.post("/v1/manage/backup")
+async def create_memory_backup(request: MemoryClearRequest) -> dict[str, Any]:
+    backup = await asyncio.to_thread(
+        _store().create_backup,
+        "manual",
+        BACKUP_RETENTION_COUNT,
+    )
+    return {
+        "status": "created",
+        "backup_retention_count": BACKUP_RETENTION_COUNT,
+        "backup": backup,
+    }
+
+
+@app.post("/v1/manage/restore-backup")
+async def restore_memory_backup(request: BackupRestoreRequest) -> dict[str, Any]:
+    result = await asyncio.to_thread(
+        _store().restore_backup,
+        request.backup_id,
+        BACKUP_RETENTION_COUNT,
+    )
+    result["backup_retention_count"] = BACKUP_RETENTION_COUNT
+    return result
 
 
 def _extract_json(text: str) -> dict[str, Any]:

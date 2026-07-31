@@ -8,6 +8,9 @@ const {
   forgetMemory,
   restoreMemory,
   clearMemories,
+  listBackups,
+  createBackup,
+  restoreBackup,
 } = require("../memory-client");
 
 const PROTOCOL_VERSION = 1;
@@ -88,6 +91,18 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
         break;
       case "clear":
         result = await clearMemories();
+        break;
+      case "backup_list":
+        result = await listBackups({
+          limit: Math.max(1, Math.min(Number(request.limit) || 20, 50)),
+          offset: Math.max(0, Math.min(Number(request.offset) || 0, 1_000_000)),
+        });
+        break;
+      case "backup_create":
+        result = await createBackup();
+        break;
+      case "backup_restore":
+        result = await restoreBackup(String(request.backupId || ""));
         break;
       default:
         fail(socket, message.requestId, "invalid_action", "Unknown memory action.");
@@ -251,10 +266,12 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
         if (!metadata.final) return;
         send(pending.socket, "generate_response", pending.requestId, {
           text: output.join("\n\n"),
+          metrics: metadata.metrics || null,
         });
       } else {
         send(pending.socket, "generate_response", pending.requestId, {
           text: String(text || ""),
+          metrics: metadata.metrics || null,
         });
       }
       untrackRequest(pending.requestId);

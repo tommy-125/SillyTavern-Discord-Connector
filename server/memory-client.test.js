@@ -107,14 +107,20 @@ test("memory management uses the shared character scope", async () => {
   await client.forgetMemory("abcdef12");
   await client.restoreMemory("abcdef12");
   await client.clearMemories();
+  await client.listBackups({ limit: 5, offset: 10 });
+  await client.createBackup();
+  await client.restoreBackup("20260730T120000Z-manual-abcdef12");
 
   assert.deepEqual(
     requests.map((request) => request.url.split("/").at(-1)),
-    ["list", "forget", "restore", "clear"],
+    ["list", "forget", "restore", "clear", "backups", "backup", "restore-backup"],
   );
   assert.ok(requests.every((request) => request.body.character_id === "Kuro"));
   assert.equal(requests[0].body.status, "deleted");
   assert.equal(requests[0].body.limit, 12);
   assert.equal(requests[0].body.offset, 24);
   assert.equal(requests[1].body.memory_id, "abcdef12");
+  assert.equal(requests[4].body.limit, 5);
+  assert.equal(requests[4].body.offset, 10);
+  assert.equal(requests[6].body.backup_id, "20260730T120000Z-manual-abcdef12");
 });

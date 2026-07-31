@@ -193,6 +193,23 @@ function connect() {
         sharedState.streamResponses = data.streamResponses === true;
         sharedState.dialogueOnlyResponses =
           data.dialogueOnlyResponses === true;
+        if (Number.isFinite(data.generationTimeoutMs) && data.generationTimeoutMs > 0) {
+          sharedState.generationTimeoutMs = data.generationTimeoutMs;
+        }
+        if (
+          Number.isInteger(data.recentChannelTokenBudget) &&
+          data.recentChannelTokenBudget > 0
+        ) {
+          sharedState.recentChannelTokenBudget = data.recentChannelTokenBudget;
+        }
+        if (Number.isInteger(data.memoryTokenBudget) && data.memoryTokenBudget > 0) {
+          sharedState.memoryTokenBudget = data.memoryTokenBudget;
+        }
+        console.info(
+          `[Discord Bridge] Generation watchdog ${sharedState.generationTimeoutMs} ms; ` +
+            `dynamic prompt budgets recent=${sharedState.recentChannelTokenBudget}, ` +
+            `memory=${sharedState.memoryTokenBudget} tokens.`,
+        );
         const hasProPlugin = Object.entries(data.plugins || {}).some(
           ([platform, status]) => platform !== "discord" && status === "active",
         );
@@ -228,10 +245,31 @@ function connect() {
             Number.isFinite(data.receivedAt) ? Date.now() - data.receivedAt : "unknown"
           } ms; pending ahead ${pendingAhead}`,
         );
-        await enqueueGenerationTask(() => {
-          data.queueDelayMs = Math.round(performance.now() - queuedAt);
-          return handleUserMessage(data);
-        });
+        await enqueueGenerationTask(
+          ({ abortController }) => {
+            data.queueDelayMs = Math.round(performance.now() - queuedAt);
+            return handleUserMessage(data, { abortController });
+          },
+          {
+            timeoutMs: sharedState.generationTimeoutMs,
+            onTimeout: (error) =>
+              console.error(`[Discord Bridge] ${error.message}; aborting generation.`),
+            onUnresponsive: () => {
+              console.error(
+                '[Discord Bridge] Timed-out generation ignored abort; reloading SillyTavern to protect global state.',
+              );
+              safeSend({
+                type: 'error_message',
+                requestId: data.requestId,
+                receivedAt: data.receivedAt,
+                chatId: data.chatId,
+                text: '生成逾時，SillyTavern 正在自動恢復，請稍後再試。',
+                metrics: { status: 'timeout' },
+              });
+              window.location.reload();
+            },
+          },
+        );
         return;
       }
 

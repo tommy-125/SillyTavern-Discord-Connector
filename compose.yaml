@@ -51,6 +51,9 @@ services:
       SILLYTAVERN_WHITELISTMODE: "true"
       SILLYTAVERN_WHITELIST: '["::1","127.0.0.1","10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"]'
       SILLYTAVERN_PRIVATEADDRESSWHITELIST_ENABLED: "true"
+      # Keep the SSRF filter enabled, but allow this trusted Podman Compose
+      # network so SillyTavern can reach the internal OpenRouter metrics proxy.
+      SILLYTAVERN_PRIVATEADDRESSWHITELIST_ALLOWEDRANGES: ${ST_PRIVATE_ADDRESS_ALLOWED_RANGES:-["127.0.0.0/8","::1/128","10.89.2.0/24"]}
       SILLYTAVERN_BASICAUTHMODE: ${ST_BASIC_AUTH_ENABLED:-false}
       SILLYTAVERN_BASICAUTHUSER_USERNAME: ${ST_BASIC_AUTH_USERNAME:-}
       SILLYTAVERN_BASICAUTHUSER_PASSWORD: ${ST_BASIC_AUTH_PASSWORD:-}
@@ -77,6 +80,8 @@ services:
     depends_on:
       memory-service:
         condition: service_started
+      metrics-proxy:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       CONNECTOR_DATA_DIR: /data
@@ -85,6 +90,7 @@ services:
       MEMORY_RECALL_TIMEOUT_MS: ${MEMORY_RECALL_TIMEOUT_MS:-500}
       MEMORY_CHARACTER_ID: ${MEMORY_CHARACTER_ID:-Kuro}
       MEMORY_TRASH_RETENTION_DAYS: ${MEMORY_TRASH_RETENTION_DAYS:-30}
+      METRICS_PROXY_URL: http://metrics-proxy:8081
       KUROHELPER_API_HOST: 0.0.0.0
       KUROHELPER_API_PORT: 2334
       KUROHELPER_BRIDGE_SECRET: ${KUROHELPER_BRIDGE_SECRET:-}
@@ -112,6 +118,9 @@ services:
       MEMORY_EXTRACTION_MODEL: ${MEMORY_EXTRACTION_MODEL:-deepseek/deepseek-v4-flash}
       MEMORY_MAINTENANCE_INTERVAL_SECONDS: ${MEMORY_MAINTENANCE_INTERVAL_SECONDS:-21600}
       MEMORY_TRASH_RETENTION_DAYS: ${MEMORY_TRASH_RETENTION_DAYS:-30}
+      MEMORY_BACKUP_ENABLED: ${MEMORY_BACKUP_ENABLED:-true}
+      MEMORY_BACKUP_INTERVAL_SECONDS: ${MEMORY_BACKUP_INTERVAL_SECONDS:-86400}
+      MEMORY_BACKUP_RETENTION_COUNT: ${MEMORY_BACKUP_RETENTION_COUNT:-5}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       TZ: ${TZ:-Asia/Taipei}
@@ -119,6 +128,29 @@ services:
       - "8090"
     volumes:
       - ./runtime/memory:/data
+
+  metrics-proxy:
+    build:
+      context: .
+      dockerfile: deploy/metrics-proxy/Dockerfile
+    image: ${METRICS_PROXY_IMAGE:-local/kurohelper-metrics-proxy}:1.0.0
+    container_name: kurohelper-metrics-proxy
+    restart: unless-stopped
+    environment:
+      METRICS_PROXY_PORT: 8081
+      METRICS_UPSTREAM_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      METRICS_RECORD_TTL_SECONDS: ${METRICS_RECORD_TTL_SECONDS:-600}
+      METRICS_MAX_RECORDS: ${METRICS_MAX_RECORDS:-1000}
+      OPENROUTER_FORCE_REASONING_EFFORT: ${OPENROUTER_FORCE_REASONING_EFFORT-}
+      OPENROUTER_PROVIDER_SORT: ${OPENROUTER_PROVIDER_SORT:-latency}
+    expose:
+      - "8081"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 5
 
   browser-worker:
     build:
@@ -133,22 +165,39 @@ services:
         condition: service_healthy
       ai-runtime:
         condition: service_started
+      metrics-proxy:
+        condition: service_healthy
     environment:
       SILLYTAVERN_URL: http://sillytavern:8000
       CONNECTOR_BRIDGE_URL: ws://ai-runtime:2333
       ST_BASIC_AUTH_USERNAME: ${ST_BASIC_AUTH_USERNAME:-}
       ST_BASIC_AUTH_PASSWORD: ${ST_BASIC_AUTH_PASSWORD:-}
       CONNECTOR_UI_TIMEOUT_MS: ${CONNECTOR_UI_TIMEOUT_MS:-120000}
+      CONNECTOR_UI_READY_ATTEMPT_MS: ${CONNECTOR_UI_READY_ATTEMPT_MS:-20000}
       CONNECTOR_WATCH_INTERVAL_MS: ${CONNECTOR_WATCH_INTERVAL_MS:-15000}
+      BROWSER_HEALTH_PORT: 8082
       CONNECTOR_PROMPT_SNAPSHOT_PATH: ${CONNECTOR_PROMPT_SNAPSHOT_PATH:-}
       CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE: ${CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE:-}
+      CONNECTOR_PROMPT_SNAPSHOT_DISPLAY_NAME: ${CONNECTOR_PROMPT_SNAPSHOT_DISPLAY_NAME:-}
+      CONNECTOR_PROMPT_SNAPSHOT_RECENT_CONTEXT: ${CONNECTOR_PROMPT_SNAPSHOT_RECENT_CONTEXT:-}
+      CONNECTOR_PROMPT_SNAPSHOT_MEMORY_CONTEXT: ${CONNECTOR_PROMPT_SNAPSHOT_MEMORY_CONTEXT:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_REASONING_EFFORT: ${OPENROUTER_REASONING_EFFORT:-none}
+      OPENROUTER_PROXY_URL: http://metrics-proxy:8081/v1
+      OPENROUTER_REASONING_EFFORT: ${OPENROUTER_REASONING_EFFORT:-auto}
+      OPENROUTER_SHOW_THOUGHTS: ${OPENROUTER_SHOW_THOUGHTS:-false}
       ST_DEFAULT_CHARACTER: ${ST_DEFAULT_CHARACTER:-Kuro}
       ST_DEFAULT_PERSONA: ${ST_DEFAULT_PERSONA:-User}
       ST_UI_LANGUAGE: ${ST_UI_LANGUAGE:-en}
       TZ: ${TZ:-Asia/Taipei}
+    expose:
+      - "8082"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8082/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
     shm_size: 1gb
     volumes:
       - ./runtime/browser/profile:/data/profile

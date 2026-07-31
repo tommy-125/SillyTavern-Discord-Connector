@@ -12,8 +12,12 @@ module.exports = {
   userLocale: "zh-TW",
   debug: false,
 
-  queueTaskTimeoutSeconds: 30,
+  // Abort one generation after this limit. A task that ignores abort causes
+  // the browser page to reload instead of blocking every channel forever.
+  queueTaskTimeoutSeconds: 60,
   imagePlaceholderTimeoutSeconds: 180,
+  recentChannelTokenBudget: 500,
+  memoryTokenBudget: 400,
   streamResponses: false,
   dialogueOnlyResponses: true,
 

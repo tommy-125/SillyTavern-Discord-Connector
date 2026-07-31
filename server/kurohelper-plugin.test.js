@@ -67,3 +67,55 @@ test("KuroHelper transport rejects missing auth and answers authenticated health
     await plugin.stop();
   }
 });
+
+test("KuroHelper transport returns generation metrics with the final reply", async () => {
+  const port = await reservePort();
+  let dispatched;
+  const dispatchedPromise = new Promise((resolve) => {
+    dispatched = resolve;
+  });
+  const plugin = createKuroHelperPlugin(
+    {
+      isSillyTavernReady: () => true,
+      onUserMessage: async () => {
+        dispatched();
+        return true;
+      },
+      log: () => {},
+    },
+    { host: "127.0.0.1", port, secret: "test-secret" },
+  );
+  await plugin.start();
+
+  try {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      headers: { Authorization: "Bearer test-secret" },
+    });
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "generate_request",
+      requestId: "generation-1",
+      payload: { channelId: "channel-1", userId: "user-1", text: "hello" },
+    }));
+    await dispatchedPromise;
+    const responsePromise = waitForMessage(socket);
+    await plugin.sendText("channel-1", "reply", {
+      kind: "ai_reply",
+      requestId: "generation-1",
+      final: true,
+      metrics: { status: "success", totalTokens: 42, costUsd: 0.001 },
+    });
+    const response = await responsePromise;
+    assert.equal(response.type, "generate_response");
+    assert.equal(response.payload.text, "reply");
+    assert.equal(response.payload.metrics.totalTokens, 42);
+    assert.equal(response.payload.metrics.costUsd, 0.001);
+    socket.close();
+  } finally {
+    await plugin.stop();
+  }
+});

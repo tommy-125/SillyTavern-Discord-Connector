@@ -122,7 +122,11 @@ function createMemoryClient(options = {}) {
     }
   }
 
-  async function manage(path, body = {}) {
+  async function manage(
+    path,
+    body = {},
+    requestTimeoutMs = Math.max(2_000, timeoutMs),
+  ) {
     if (!enabled) {
       return { status: "disabled", memories: [], count: 0 };
     }
@@ -130,7 +134,7 @@ function createMemoryClient(options = {}) {
       return await post(
         `/v1/manage/${path}`,
         { character_id: characterId, ...body },
-        Math.max(2_000, timeoutMs),
+        requestTimeoutMs,
       );
     } catch (error) {
       log("warn", `[Memory] Management request failed: ${error.message}`);
@@ -158,6 +162,29 @@ function createMemoryClient(options = {}) {
     return manage("clear");
   }
 
+  async function listBackups({ limit = 20, offset = 0 } = {}) {
+    return manage(
+      "backups",
+      {
+        limit: Math.max(1, Math.min(Number(limit) || 20, 50)),
+        offset: Math.max(0, Math.min(Number(offset) || 0, 1_000_000)),
+      },
+      10_000,
+    );
+  }
+
+  async function createBackup() {
+    return manage("backup", {}, 30_000);
+  }
+
+  async function restoreBackup(backupId) {
+    return manage(
+      "restore-backup",
+      { backup_id: String(backupId || "") },
+      120_000,
+    );
+  }
+
   return {
     recall,
     rememberTurn,
@@ -165,6 +192,9 @@ function createMemoryClient(options = {}) {
     forgetMemory,
     restoreMemory,
     clearMemories,
+    listBackups,
+    createBackup,
+    restoreBackup,
     enabled,
     characterId,
   };
@@ -180,4 +210,7 @@ module.exports = {
   forgetMemory: defaultClient.forgetMemory,
   restoreMemory: defaultClient.restoreMemory,
   clearMemories: defaultClient.clearMemories,
+  listBackups: defaultClient.listBackups,
+  createBackup: defaultClient.createBackup,
+  restoreBackup: defaultClient.restoreBackup,
 };

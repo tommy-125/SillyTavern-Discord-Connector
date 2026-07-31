@@ -15,6 +15,7 @@ const WebSocket = require('ws');
 const { log } = require('./logger');
 const { config, wssPort } = require('./config-loader');
 const { rememberTurn, recallMemories } = require('./memory-client');
+const { claimProviderMetrics } = require('./metrics-client');
 const { createPluginLoader } = require('./plugin-loader');
 const {
   fanout,
@@ -330,6 +331,9 @@ wss.on('connection', (ws) => {
       availableLanguages: AVAILABLE_LANGUAGES,
       plugins: pluginStatus,
       imagePlaceholderTimeoutMs: config.imagePlaceholderTimeoutMs,
+      generationTimeoutMs: config.queueTaskTimeoutMs,
+      recentChannelTokenBudget: config.recentChannelTokenBudget,
+      memoryTokenBudget: config.memoryTokenBudget,
       streamResponses: config.streamResponses === true,
       dialogueOnlyResponses: config.dialogueOnlyResponses === true,
     }),
@@ -364,6 +368,7 @@ wss.on('connection', (ws) => {
       setCurrentPersonaName: setDefaultPersonaName,
       setCrossRelayEnabled,
       rememberTurn,
+      claimProviderMetrics,
       log,
     });
   });
