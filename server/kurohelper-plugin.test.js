@@ -70,6 +70,7 @@ test("KuroHelper transport rejects missing auth and answers authenticated health
 
 test("KuroHelper transport returns generation metrics with the final reply", async () => {
   const port = await reservePort();
+  let receivedMetadata;
   let dispatched;
   const dispatchedPromise = new Promise((resolve) => {
     dispatched = resolve;
@@ -77,7 +78,8 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
   const plugin = createKuroHelperPlugin(
     {
       isSillyTavernReady: () => true,
-      onUserMessage: async () => {
+      onUserMessage: async (_platform, _channelId, _text, _userId, metadata) => {
+        receivedMetadata = metadata;
         dispatched();
         return true;
       },
@@ -99,9 +101,27 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
       version: 1,
       type: "generate_request",
       requestId: "generation-1",
-      payload: { channelId: "channel-1", userId: "user-1", text: "hello" },
+      payload: {
+        channelId: "channel-1",
+        userId: "user-1",
+        text: "hello",
+        images: [{
+          id: "image-1",
+          url: "https://cdn.discordapp.com/attachments/a/b/image.png",
+          filename: "image.png",
+          contentType: "image/png",
+          size: 1234,
+        }],
+      },
     }));
     await dispatchedPromise;
+    assert.deepEqual(receivedMetadata.images, [{
+      id: "image-1",
+      url: "https://cdn.discordapp.com/attachments/a/b/image.png",
+      filename: "image.png",
+      contentType: "image/png",
+      size: 1234,
+    }]);
     const responsePromise = waitForMessage(socket);
     await plugin.sendText("channel-1", "reply", {
       kind: "ai_reply",

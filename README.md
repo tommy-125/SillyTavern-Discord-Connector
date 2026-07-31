@@ -35,6 +35,7 @@ AI Runtime 不登入 Discord，也不保存 Discord Bot Token。它只接收 Go 
 - `ai-runtime`：連接瀏覽器端擴充功能，並在主機 `127.0.0.1:2334` 提供 KuroHelper API。
 - `memory-service`：事件型長期記憶、SQLite/向量檢索、分類權重、軟刪除與生命週期維護。記憶以事件或陳述為主體，Discord 使用者只作為參與者中繼資料。
 - `metrics-proxy`：在容器內透明轉送 OpenRouter 請求，擷取實際路由供應商、Token、費用與延遲；不保存 prompt 或模型回覆內容，也不對主機公開連接埠。
+- Discord 訊息附帶圖片時，`ai-runtime` 會先以 `google/gemini-2.5-flash-lite` 透過 OpenRouter 產生受防護的圖片描述，再把描述作為本次請求的系統脈絡交給文字模型；Vision 失敗時會退回純文字流程。
 - `character-seed`：將角色卡同步進 SillyTavern data volume。
 
 長期記憶分為 `conversation_event`、`user_preference`、`plan_task`、`relationship_milestone`、`decision` 與 `summary`。預設只在來源頻道回想；只有高重要度的共同決定或階段摘要可以跨頻道。使用者偏好必須由當事人在本次訊息中明確表達，Kuro 的身分與偏好由角色卡負責，不會從助手回覆寫入記憶。

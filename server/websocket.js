@@ -16,6 +16,7 @@ const { log } = require('./logger');
 const { config, wssPort } = require('./config-loader');
 const { rememberTurn, recallMemories } = require('./memory-client');
 const { claimProviderMetrics } = require('./metrics-client');
+const { describeImages } = require('./vision-client');
 const { createPluginLoader } = require('./plugin-loader');
 const {
   fanout,
@@ -226,7 +227,7 @@ const pluginLoader = createPluginLoader({
     if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN) {
       return false;
     }
-    const memory = await recallMemories({
+    const memoryPromise = recallMemories({
       query: [
         metadata.retrievalText,
         `[${metadata.displayName || userId}] ${text}`,
@@ -240,6 +241,12 @@ const pluginLoader = createPluginLoader({
         ...(metadata.contextParticipants || []).map((user) => user?.id),
       ].filter(Boolean),
     });
+    const visionPromise = describeImages(metadata.images, text);
+    const [memory, vision] = await Promise.all([memoryPromise, visionPromise]);
+    const recentChannelContext = [
+      metadata.recentChannelContext,
+      vision.context,
+    ].filter(Boolean).join('\n\n');
     sendToSillyTavern({
       type: 'user_message',
       text,
@@ -251,10 +258,12 @@ const pluginLoader = createPluginLoader({
       displayName: metadata.displayName || '',
       mentionedUsers: metadata.mentionedUsers || [],
       contextParticipants: metadata.contextParticipants || [],
-      recentChannelContext: metadata.recentChannelContext || '',
+      recentChannelContext,
       memoryRecentContext: metadata.retrievalText || '',
       memoryContext: memory.context || '',
       memoryRecallMs: memory.elapsedMs || 0,
+      visionMs: vision.elapsedMs || 0,
+      visionModel: vision.model || '',
       ...(mappedPersona ? { mappedPersona } : {}),
       ...(userLocale ? { userLocale } : {}),
     });

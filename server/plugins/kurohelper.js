@@ -57,8 +57,24 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
     send(socket, "error_response", requestId, null, { code, message });
   }
 
-  function requestFingerprint(channelId, userId, text) {
-    return JSON.stringify([String(channelId), String(userId), String(text)]);
+  function normalizeImages(images) {
+    if (!Array.isArray(images)) return [];
+    return images.slice(0, 4).map((image) => ({
+      id: String(image?.id || "").slice(0, 100),
+      url: String(image?.url || "").trim().slice(0, 2048),
+      filename: String(image?.filename || "").slice(0, 255),
+      contentType: String(image?.contentType || "").slice(0, 100),
+      size: Math.max(0, Math.min(Number(image?.size) || 0, 10 * 1024 * 1024)),
+    })).filter((image) => image.url);
+  }
+
+  function requestFingerprint(channelId, userId, text, images = []) {
+    return JSON.stringify([
+      String(channelId),
+      String(userId),
+      String(text),
+      images.map((image) => [image.id, image.url]),
+    ]);
   }
 
   function pruneRequestCache(now = Date.now()) {
@@ -206,11 +222,18 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
     const channelId = String(payload.channelId || "").trim();
     const userId = String(payload.userId || "").trim();
     const text = String(payload.text || "").trim();
+    const images = normalizeImages(payload.images);
+    if (Array.isArray(payload.images) && payload.images.length > 0) {
+      handlers.log(
+        "log",
+        `[KuroHelper] Request ${message.requestId.slice(-8)} received ${payload.images.length} attachment(s); ${images.length} accepted for Vision.`,
+      );
+    }
     if (!channelId || !userId || !text) {
       fail(socket, message.requestId, "invalid_request", "channelId, userId and text are required.");
       return;
     }
-    const fingerprint = requestFingerprint(channelId, userId, text);
+    const fingerprint = requestFingerprint(channelId, userId, text, images);
     const completed = completedByRequest.get(message.requestId);
     if (completed) {
       if (completed.fingerprint !== fingerprint) {
@@ -253,6 +276,7 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
             : [],
           recentChannelContext: String(payload.recentChannelContext || ""),
           retrievalText: String(payload.retrievalText || ""),
+          images,
         },
       );
       if (!accepted) {
