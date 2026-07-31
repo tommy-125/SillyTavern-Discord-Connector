@@ -112,6 +112,23 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertNotEqual(first_page[0]["id"], second_page[0]["id"])
         self.assertEqual(self.store.count_memories("Kuro"), 2)
 
+    def test_get_memory_accepts_unique_prefix_across_statuses(self):
+        self.store.apply_operations(
+            "Kuro",
+            [self.preference("discord:u1", "Tommy", "Tommy likes tea")],
+            request_id="detail-1",
+            channel_id="channel-1",
+        )
+        memory = self.store.list_memories("Kuro")[0]
+        found = self.store.get_memory("Kuro", memory["id"][:8])
+        self.assertEqual(found["status"], "found")
+        self.assertEqual(found["memory"]["id"], memory["id"])
+
+        self.store.soft_delete("Kuro", memory["id"][:8])
+        deleted = self.store.get_memory("Kuro", memory["id"][:8])
+        self.assertEqual(deleted["memory"]["status"], "deleted")
+        self.assertEqual(self.store.get_memory("Kuro", "missing")["status"], "not_found")
+
     def test_recall_is_channel_scoped_but_includes_global(self):
         self.store.apply_operations(
             "Kuro", [self.preference("discord:u1", "肉圓", "肉圓喜歡紅豆冰棒。")], request_id="r1", channel_id="channel-1"

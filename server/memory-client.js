@@ -150,6 +150,10 @@ function createMemoryClient(options = {}) {
     });
   }
 
+  async function getMemory(memoryId) {
+    return manage("get", { memory_id: String(memoryId || "") });
+  }
+
   async function forgetMemory(memoryId) {
     return manage("forget", { memory_id: String(memoryId || "") });
   }
@@ -189,6 +193,7 @@ function createMemoryClient(options = {}) {
     recall,
     rememberTurn,
     listMemories,
+    getMemory,
     forgetMemory,
     restoreMemory,
     clearMemories,
@@ -207,6 +212,7 @@ module.exports = {
   recallMemories: defaultClient.recall,
   rememberTurn: defaultClient.rememberTurn,
   listMemories: defaultClient.listMemories,
+  getMemory: defaultClient.getMemory,
   forgetMemory: defaultClient.forgetMemory,
   restoreMemory: defaultClient.restoreMemory,
   clearMemories: defaultClient.clearMemories,

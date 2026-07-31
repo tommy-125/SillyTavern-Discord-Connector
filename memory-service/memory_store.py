@@ -686,6 +686,26 @@ class MemoryStore:
             ).fetchone()
             return int(row["total"] if row else 0)
 
+    def get_memory(self, character_id: str, memory_id: str) -> dict[str, Any]:
+        namespace = make_namespace(character_id)
+        prefix = str(memory_id or "").strip()
+        if len(prefix) < 6:
+            return {"status": "not_found"}
+        with self._lock:
+            rows = self._db.execute(
+                """
+                SELECT * FROM memories
+                WHERE namespace = ? AND id LIKE ?
+                LIMIT 2
+                """,
+                (namespace, f"{prefix}%"),
+            ).fetchall()
+            if len(rows) > 1:
+                return {"status": "ambiguous"}
+            if not rows:
+                return {"status": "not_found"}
+            return {"status": "found", "memory": self._row(rows[0])}
+
     def _resolve_memory_id(
         self,
         namespace: str,

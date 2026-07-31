@@ -345,16 +345,25 @@ async def run_maintenance() -> dict[str, int]:
 def _management_memory(memory: dict[str, Any]) -> dict[str, Any]:
     result = {
         "id": memory["id"],
+        "subject_id": memory.get("subject_id", ""),
         "subject_name": memory.get("subject_name", "") or "事件記憶",
         "key": memory["memory_key"],
         "value": memory["memory_value"],
         "summary": memory["memory_value"],
         "category": memory["category"],
+        "importance": memory.get("importance", 0),
+        "confidence": memory.get("confidence", 0),
         "scope": memory.get("scope_type", "channel"),
         "scope_id": memory.get("scope_id", ""),
         "participants": memory.get("participants", []),
         "status": memory["status"],
+        "created_at": memory.get("created_at", ""),
         "updated_at": memory["updated_at"],
+        "last_accessed_at": memory.get("last_accessed_at", ""),
+        "access_count": memory.get("access_count", 0),
+        "supersedes_id": memory.get("supersedes_id", ""),
+        "source_request_id": memory.get("source_request_id", ""),
+        "source_channel_id": memory.get("source_channel_id", ""),
     }
     if memory["status"] == "deleted":
         result["purge_after"] = (
@@ -395,6 +404,19 @@ async def list_managed_memories(request: MemoryListRequest) -> dict[str, Any]:
         "trash_retention_days": TRASH_RETENTION_DAYS,
         "memories": [_management_memory(memory) for memory in memories],
     }
+
+
+@app.post("/v1/manage/get")
+async def get_managed_memory(request: MemoryIdRequest) -> dict[str, Any]:
+    result = await asyncio.to_thread(
+        _store().get_memory,
+        request.character_id,
+        request.memory_id,
+    )
+    if result.get("memory"):
+        result["memory"] = _management_memory(result["memory"])
+    result["trash_retention_days"] = TRASH_RETENTION_DAYS
+    return result
 
 
 @app.post("/v1/manage/forget")

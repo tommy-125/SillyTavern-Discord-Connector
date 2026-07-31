@@ -5,6 +5,7 @@
 const WebSocket = require("ws");
 const {
   listMemories,
+  getMemory,
   forgetMemory,
   restoreMemory,
   clearMemories,
@@ -128,6 +129,9 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
           limit: Math.max(1, Math.min(Number(request.limit) || 20, 50)),
           offset: Math.max(0, Math.min(Number(request.offset) || 0, 1_000_000)),
         });
+        break;
+      case "get":
+        result = await getMemory(String(request.memoryId || ""));
         break;
       case "forget":
         result = await forgetMemory(String(request.memoryId || ""));
