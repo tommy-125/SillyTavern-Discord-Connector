@@ -59,6 +59,33 @@ function usageFromPayload(payload) {
   };
 }
 
+function routingFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const metadata = payload.openrouter_metadata;
+  const endpoints = Array.isArray(metadata?.endpoints?.available)
+    ? metadata.endpoints.available
+    : [];
+  const attempts = Array.isArray(metadata?.attempts) ? metadata.attempts : [];
+  const selected = endpoints.find((endpoint) => endpoint?.selected === true);
+  const successfulAttempt = [...attempts]
+    .reverse()
+    .find((attempt) => Number(attempt?.status) >= 200 && Number(attempt?.status) < 300);
+  const provider = String(
+    selected?.provider || successfulAttempt?.provider || payload.provider || "",
+  ).trim();
+  const providerModel = String(
+    selected?.model || successfulAttempt?.model || "",
+  ).trim();
+  if (!provider && !metadata) return null;
+  return {
+    provider,
+    providerModel,
+    routingStrategy: String(metadata?.strategy || ""),
+    routingRegion: String(metadata?.region || ""),
+    routingAttempt: safeNumber(metadata?.attempt),
+  };
+}
+
 function applyGenerationOverrides(payload, options = {}) {
   const forceReasoningEffort = options.forceReasoningEffort
     ?? FORCE_REASONING_EFFORT;
@@ -215,9 +242,11 @@ async function proxyRequest(request, response) {
     }
   }
 
+  const headers = requestHeaders(request);
+  if (isGeneration) headers.set("x-openrouter-metadata", "enabled");
   const upstream = await requestUpstream(buildUpstreamUrl(request.url), {
     method: request.method,
-    headers: requestHeaders(request),
+    headers,
     body,
   });
   const headersAt = Date.now();
@@ -227,6 +256,7 @@ async function proxyRequest(request, response) {
   let usage = null;
   let responseModel = "";
   let finishReason = "";
+  let routing = null;
   const generationId =
     upstreamHeader(upstream, "x-generation-id") || randomUUID();
   const contentType = upstreamHeader(upstream, "content-type") || "";
@@ -243,6 +273,7 @@ async function proxyRequest(request, response) {
     const reason = payload?.choices?.[0]?.finish_reason;
     if (reason) finishReason = String(reason);
     usage = usageFromPayload(payload) || usage;
+    routing = routingFromPayload(payload) || routing;
   };
 
   if (upstream) {
@@ -283,6 +314,11 @@ async function proxyRequest(request, response) {
     streamed,
     statusCode: upstream.statusCode,
     finishReason,
+    provider: routing?.provider || "",
+    providerModel: routing?.providerModel || "",
+    routingStrategy: routing?.routingStrategy || "",
+    routingRegion: routing?.routingRegion || "",
+    routingAttempt: routing?.routingAttempt ?? null,
     usageAvailable: usage != null,
     ...(usage || {}),
     claimed: false,
@@ -327,6 +363,7 @@ module.exports = {
   buildUpstreamUrl,
   claimRecords,
   parseSseEvents,
+  routingFromPayload,
   requestUpstream,
   startServer,
   usageFromPayload,

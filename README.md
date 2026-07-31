@@ -34,7 +34,7 @@ AI Runtime 不登入 Discord，也不保存 Discord Bot Token。它只接收 Go 
 - `browser-worker`：以 Playwright 開啟 SillyTavern，維持瀏覽器端擴充功能運行。健康檢查會同時驗證 UI、AI provider 與 bridge；UI 初始化逾時會自動重新載入，連續 session 失敗則退出交由容器重啟。
 - `ai-runtime`：連接瀏覽器端擴充功能，並在主機 `127.0.0.1:2334` 提供 KuroHelper API。
 - `memory-service`：事件型長期記憶、SQLite/向量檢索、分類權重、軟刪除與生命週期維護。記憶以事件或陳述為主體，Discord 使用者只作為參與者中繼資料。
-- `metrics-proxy`：在容器內透明轉送 OpenRouter 請求，擷取供應商回傳的 Token、費用與延遲；不保存 prompt 或模型回覆內容，也不對主機公開連接埠。
+- `metrics-proxy`：在容器內透明轉送 OpenRouter 請求，擷取實際路由供應商、Token、費用與延遲；不保存 prompt 或模型回覆內容，也不對主機公開連接埠。
 - `character-seed`：將角色卡同步進 SillyTavern data volume。
 
 長期記憶分為 `conversation_event`、`user_preference`、`plan_task`、`relationship_milestone`、`decision` 與 `summary`。預設只在來源頻道回想；只有高重要度的共同決定或階段摘要可以跨頻道。使用者偏好必須由當事人在本次訊息中明確表達，Kuro 的身分與偏好由角色卡負責，不會從助手回覆寫入記憶。
@@ -55,6 +55,8 @@ memoryTokenBudget: 400,
 ```
 
 近期頻道內容超過預算時保留最新尾端，長期記憶則保留召回排序較前的內容。生成超過 60 秒會先中止；若中止後仍無法結束，瀏覽器頁面會重新載入，以免單一請求永久阻塞全域生成佇列。
+
+完成的生成結果會依 Request ID 暫存 10 分鐘（`KUROHELPER_REQUEST_CACHE_TTL_SECONDS=600`）。Bot 因 WebSocket 重連而重送同一個 Discord Message ID 時，Runtime 會接續執行中的請求或重播完成結果，不會再次呼叫模型。
 5. 啟動：
 
 ```powershell

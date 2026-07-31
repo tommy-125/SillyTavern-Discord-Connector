@@ -14,6 +14,15 @@ const {
 } = require("../memory-client");
 
 const PROTOCOL_VERSION = 1;
+const configuredRequestCacheTtl = Number.parseInt(
+  process.env.KUROHELPER_REQUEST_CACHE_TTL_SECONDS || "600",
+  10,
+);
+const REQUEST_CACHE_TTL_MS =
+  (Number.isFinite(configuredRequestCacheTtl) && configuredRequestCacheTtl > 0
+    ? configuredRequestCacheTtl
+    : 600) * 1000;
+const REQUEST_CACHE_MAX = 1000;
 
 function createKuroHelperPlugin(handlers, pluginConfig = {}) {
   const port = Number.parseInt(
@@ -29,6 +38,7 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
   const pendingByRequest = new Map();
   const pendingByChat = new Map();
   const outputByRequest = new Map();
+  const completedByRequest = new Map();
 
   function send(socket, type, requestId, payload = null, error = null) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -46,8 +56,28 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
     send(socket, "error_response", requestId, null, { code, message });
   }
 
-  function trackRequest(requestId, chatId, socket) {
-    pendingByRequest.set(requestId, { requestId, chatId, socket });
+  function requestFingerprint(channelId, userId, text) {
+    return JSON.stringify([String(channelId), String(userId), String(text)]);
+  }
+
+  function pruneRequestCache(now = Date.now()) {
+    for (const [requestId, completed] of completedByRequest) {
+      if (completed.expiresAt > now && completedByRequest.size <= REQUEST_CACHE_MAX) break;
+      completedByRequest.delete(requestId);
+    }
+    for (const [requestId, pending] of pendingByRequest) {
+      if (pending.expiresAt <= now) untrackRequest(requestId);
+    }
+  }
+
+  function trackRequest(requestId, chatId, socket, fingerprint) {
+    pendingByRequest.set(requestId, {
+      requestId,
+      chatId,
+      socket,
+      fingerprint,
+      expiresAt: Date.now() + REQUEST_CACHE_TTL_MS,
+    });
     if (!pendingByChat.has(chatId)) pendingByChat.set(chatId, []);
     pendingByChat.get(chatId).push(requestId);
   }
@@ -70,6 +100,22 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
     }
     const queue = pendingByChat.get(String(chatId || "")) || [];
     return queue.length > 0 ? pendingByRequest.get(queue[0]) : null;
+  }
+
+  function completeRequest(pending, type, payload = null, error = null) {
+    if (!pending) return false;
+    const completed = {
+      type,
+      payload,
+      error,
+      fingerprint: pending.fingerprint,
+      expiresAt: Date.now() + REQUEST_CACHE_TTL_MS,
+    };
+    completedByRequest.set(pending.requestId, completed);
+    pruneRequestCache();
+    const delivered = send(pending.socket, type, pending.requestId, payload, error);
+    untrackRequest(pending.requestId);
+    return delivered;
   }
 
   async function handleMemory(socket, message) {
@@ -128,6 +174,7 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
       fail(socket, message?.requestId || "", "invalid_envelope", "Invalid protocol envelope.");
       return;
     }
+    pruneRequestCache();
 
     if (message.type === "health_request") {
       send(socket, "health_response", message.requestId, {
@@ -159,16 +206,32 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
       fail(socket, message.requestId, "invalid_request", "channelId, userId and text are required.");
       return;
     }
+    const fingerprint = requestFingerprint(channelId, userId, text);
+    const completed = completedByRequest.get(message.requestId);
+    if (completed) {
+      if (completed.fingerprint !== fingerprint) {
+        fail(socket, message.requestId, "request_id_conflict", "Request ID was already used for different content.");
+        return;
+      }
+      send(socket, completed.type, message.requestId, completed.payload, completed.error);
+      return;
+    }
+    const existing = pendingByRequest.get(message.requestId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        fail(socket, message.requestId, "request_id_conflict", "Request ID is already running with different content.");
+        return;
+      }
+      existing.socket = socket;
+      existing.expiresAt = Date.now() + REQUEST_CACHE_TTL_MS;
+      return;
+    }
     if (!handlers.isSillyTavernReady()) {
       fail(socket, message.requestId, "runtime_not_ready", "SillyTavern is not connected.");
       return;
     }
-    if (pendingByRequest.has(message.requestId)) {
-      fail(socket, message.requestId, "duplicate_request", "This request is already running.");
-      return;
-    }
 
-    trackRequest(message.requestId, channelId, socket);
+    trackRequest(message.requestId, channelId, socket, fingerprint);
     try {
       const accepted = await handlers.onUserMessage(
         "kurohelper",
@@ -233,8 +296,8 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
         });
         socket.on("close", () => {
           if (activeSocket === socket) activeSocket = null;
-          for (const [requestId, pending] of pendingByRequest) {
-            if (pending.socket === socket) untrackRequest(requestId);
+          for (const pending of pendingByRequest.values()) {
+            if (pending.socket === socket) pending.socket = null;
           }
         });
       });
@@ -254,6 +317,7 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
       pendingByRequest.clear();
       pendingByChat.clear();
       outputByRequest.clear();
+      completedByRequest.clear();
     },
 
     async sendText(chatId, text, metadata = {}) {
@@ -264,17 +328,16 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
         output.push(String(text || ""));
         outputByRequest.set(pending.requestId, output);
         if (!metadata.final) return;
-        send(pending.socket, "generate_response", pending.requestId, {
+        completeRequest(pending, "generate_response", {
           text: output.join("\n\n"),
           metrics: metadata.metrics || null,
         });
       } else {
-        send(pending.socket, "generate_response", pending.requestId, {
+        completeRequest(pending, "generate_response", {
           text: String(text || ""),
           metrics: metadata.metrics || null,
         });
       }
-      untrackRequest(pending.requestId);
     },
 
     async sendTyping(chatId) {
@@ -302,19 +365,17 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
     async streamEnd(chatId, payload) {
       const pending = findPending(chatId, payload?.requestId);
       if (!pending || !payload?.finalText) return;
-      send(pending.socket, "generate_response", pending.requestId, {
+      completeRequest(pending, "generate_response", {
         text: String(payload.finalText),
       });
-      untrackRequest(pending.requestId);
     },
 
     async sendRecap(chatId, entries) {
       const pending = findPending(chatId);
       if (!pending) return;
-      send(pending.socket, "generate_response", pending.requestId, {
+      completeRequest(pending, "generate_response", {
         text: (entries || []).map((entry) => entry?.text || "").filter(Boolean).join("\n\n"),
       });
-      untrackRequest(pending.requestId);
     },
 
     async deleteRoleplayMessages() {},

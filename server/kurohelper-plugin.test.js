@@ -119,3 +119,76 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
     await plugin.stop();
   }
 });
+
+test("KuroHelper transport reattaches in-flight duplicates and replays completed requests", async () => {
+  const port = await reservePort();
+  let dispatchCount = 0;
+  let dispatched;
+  const dispatchedPromise = new Promise((resolve) => {
+    dispatched = resolve;
+  });
+  const plugin = createKuroHelperPlugin(
+    {
+      isSillyTavernReady: () => true,
+      onUserMessage: async () => {
+        dispatchCount += 1;
+        dispatched();
+        return true;
+      },
+      log: () => {},
+    },
+    { host: "127.0.0.1", port, secret: "test-secret" },
+  );
+  await plugin.start();
+
+  try {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      headers: { Authorization: "Bearer test-secret" },
+    });
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const request = JSON.stringify({
+      version: 1,
+      type: "generate_request",
+      requestId: "same-discord-message",
+      payload: { channelId: "channel-1", userId: "user-1", text: "hello" },
+    });
+    socket.send(request);
+    await dispatchedPromise;
+    socket.send(request);
+
+    const firstResponsePromise = waitForMessage(socket);
+    await plugin.sendText("channel-1", "reply", {
+      kind: "ai_reply",
+      requestId: "same-discord-message",
+      final: true,
+      metrics: { status: "success" },
+    });
+    const firstResponse = await firstResponsePromise;
+    assert.equal(firstResponse.payload.text, "reply");
+
+    const replayPromise = waitForMessage(socket);
+    socket.send(request);
+    const replay = await replayPromise;
+    assert.equal(replay.type, "generate_response");
+    assert.equal(replay.payload.text, "reply");
+    assert.equal(dispatchCount, 1);
+
+    const conflictPromise = waitForMessage(socket);
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "generate_request",
+      requestId: "same-discord-message",
+      payload: { channelId: "channel-1", userId: "user-1", text: "different" },
+    }));
+    const conflict = await conflictPromise;
+    assert.equal(conflict.type, "error_response");
+    assert.equal(conflict.error.code, "request_id_conflict");
+    assert.equal(dispatchCount, 1);
+    socket.close();
+  } finally {
+    await plugin.stop();
+  }
+});
