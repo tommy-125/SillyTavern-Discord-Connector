@@ -81,15 +81,23 @@ import {
 import { buildLastExchange, buildHistory, scheduleRecap } from './recap.js';
 import { looksLikePromptLeak } from './model-output-guard.mjs';
 import { formatDialogueOnly } from './dialogue-only.mjs';
-import { suppressPreviousChatMessages } from './prompt-history.mjs';
+import { cacheRawReply } from './raw-reply-cache.mjs';
+import {
+  injectDiscordPromptHistory,
+  suppressPreviousChatMessages,
+} from './prompt-history.mjs';
 import { buildRequestContextPrompt } from './request-context.mjs';
-import { buildBudgetedDynamicContexts } from './prompt-budget.mjs';
+import {
+  buildBudgetedDynamicContexts,
+  buildBudgetedDynamicHistory,
+} from './prompt-budget.mjs';
 
 // String fallback covers older ST versions that don't export this event type.
 const GROUP_WRAPPER_FINISHED =
   event_types.GROUP_WRAPPER_FINISHED ?? 'group_wrapper_finished';
 const MEMORY_PROMPT_KEY = 'discord_connector_long_term_memory';
 const RECENT_CHANNEL_PROMPT_KEY = 'discord_connector_recent_channel_context';
+const VISION_PROMPT_KEY = 'discord_connector_vision_context';
 const REQUEST_CONTEXT_PROMPT_KEY = 'discord_connector_request_context';
 
 // ---------------------------------------------------------------------------
@@ -429,8 +437,6 @@ export async function handleUserMessage(data, { abortController = new AbortContr
   };
 
   const formatTrailingAiMessages = async () => {
-    if (!sharedState.dialogueOnlyResponses) return;
-
     const { chat } = SillyTavern.getContext();
     if (!chat?.length) return;
 
@@ -440,8 +446,16 @@ export async function handleUserMessage(data, { abortController = new AbortContr
       if (msg.is_user) break;
 
       const original = String(msg.mes ?? '');
+      const cacheChanged = cacheRawReply(chat, msg, original);
+      if (!sharedState.dialogueOnlyResponses) {
+        changed ||= cacheChanged;
+        continue;
+      }
       const formatted = formatDialogueOnly(original);
-      if (formatted === original.trim()) continue;
+      if (formatted === original.trim()) {
+        changed ||= cacheChanged;
+        continue;
+      }
 
       msg.mes = formatted;
       if (Array.isArray(msg.swipes) && msg.swipes.length > 0) {
@@ -580,6 +594,7 @@ export async function handleUserMessage(data, { abortController = new AbortContr
     stContext.chat,
     stContext.symbols?.ignore ?? Symbol.for('ignore'),
   );
+  let restoreDiscordPromptHistory = () => {};
   try {
     setExtensionPrompt(
       REQUEST_CONTEXT_PROMPT_KEY,
@@ -591,21 +606,51 @@ export async function handleUserMessage(data, { abortController = new AbortContr
       false,
       extension_prompt_roles.SYSTEM,
     );
-    const dynamicContexts = buildBudgetedDynamicContexts({
-      recentChannelContext: data.recentChannelContext,
-      memoryContext: data.memoryContext,
-      recentTokenBudget: sharedState.recentChannelTokenBudget,
-      memoryTokenBudget: sharedState.memoryTokenBudget,
-    });
-    if (dynamicContexts.recentChannelContext) {
-      setExtensionPrompt(
-        RECENT_CHANNEL_PROMPT_KEY,
-        dynamicContexts.recentChannelContext,
-        extension_prompt_types.IN_CHAT,
-        1,
-        false,
-        extension_prompt_roles.SYSTEM,
+    const structuredHistory = Array.isArray(data.recentMessages);
+    const dynamicContexts = structuredHistory
+      ? buildBudgetedDynamicHistory({
+        recentMessages: data.recentMessages,
+        visionContext: data.visionContext,
+        visionObservations: data.visionObservations,
+        memoryContext: data.memoryContext,
+        dynamicContextTokenBudget: sharedState.dynamicContextTokenBudget,
+        memorySoftTokenBudget: sharedState.memorySoftTokenBudget,
+      })
+      : buildBudgetedDynamicContexts({
+        recentChannelContext: data.recentChannelContext,
+        visionContext: data.visionContext,
+        visionObservations: data.visionObservations,
+        memoryContext: data.memoryContext,
+        dynamicContextTokenBudget: sharedState.dynamicContextTokenBudget,
+        memorySoftTokenBudget: sharedState.memorySoftTokenBudget,
+      });
+    if (structuredHistory) {
+      restoreDiscordPromptHistory = injectDiscordPromptHistory(
+        stContext.chat,
+        dynamicContexts.recentMessages,
+        dynamicContexts.currentImageContext,
       );
+    } else {
+      if (dynamicContexts.recentChannelContext) {
+        setExtensionPrompt(
+          RECENT_CHANNEL_PROMPT_KEY,
+          dynamicContexts.recentChannelContext,
+          extension_prompt_types.IN_CHAT,
+          1,
+          false,
+          extension_prompt_roles.SYSTEM,
+        );
+      }
+      if (dynamicContexts.visionContext) {
+        setExtensionPrompt(
+          VISION_PROMPT_KEY,
+          dynamicContexts.visionContext,
+          extension_prompt_types.IN_CHAT,
+          1,
+          false,
+          extension_prompt_roles.SYSTEM,
+        );
+      }
     }
     if (dynamicContexts.memoryContext) {
       setExtensionPrompt(
@@ -706,7 +751,13 @@ export async function handleUserMessage(data, { abortController = new AbortContr
     removeAllListeners();
     sendStreamEnd();
   } finally {
+    restoreDiscordPromptHistory();
     restorePromptHistory();
+    try {
+      await saveChatConditional();
+    } catch (error) {
+      console.warn('[Discord Bridge] Failed to persist cleaned prompt history:', error);
+    }
     setExtensionPrompt(
       REQUEST_CONTEXT_PROMPT_KEY,
       '',
@@ -717,6 +768,14 @@ export async function handleUserMessage(data, { abortController = new AbortContr
     );
     setExtensionPrompt(
       RECENT_CHANNEL_PROMPT_KEY,
+      '',
+      extension_prompt_types.IN_CHAT,
+      1,
+      false,
+      extension_prompt_roles.SYSTEM,
+    );
+    setExtensionPrompt(
+      VISION_PROMPT_KEY,
       '',
       extension_prompt_types.IN_CHAT,
       1,

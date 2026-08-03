@@ -7,8 +7,22 @@ const {
   buildUpstreamUrl,
   parseSseEvents,
   routingFromPayload,
+  shouldTrackGeneration,
   usageFromPayload,
 } = require("./server");
+
+test("memory extraction bypasses the main generation metrics pool", () => {
+  assert.equal(
+    shouldTrackGeneration("POST", "/v1/chat/completions", {
+      "x-kuro-metrics-skip": "true",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldTrackGeneration("POST", "/v1/chat/completions", {}),
+    true,
+  );
+});
 
 test("applyGenerationOverrides forces reasoning off and requests usage", () => {
   assert.deepEqual(

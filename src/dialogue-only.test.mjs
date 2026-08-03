@@ -19,6 +19,15 @@ test('removes inline action directions', () => {
   );
 });
 
+test('removes the observed inline pause and gaze direction', () => {
+  assert.equal(
+    formatDialogueOnly(
+      '……（微微一頓，垂下目光）嗯……也是呢。對不起，多說了。',
+    ),
+    '……嗯……也是呢。對不起，多說了。',
+  );
+});
+
 test('preserves informative parentheses in spoken text', () => {
   assert.equal(
     formatDialogueOnly('今天是七月二十六日（星期日）。'),
@@ -26,16 +35,32 @@ test('preserves informative parentheses in spoken text', () => {
   );
 });
 
-test('keeps quoted speech when narration shares the same line', () => {
+test('does not rewrite quoted speech or surrounding narration', () => {
   assert.equal(
     formatDialogueOnly('她低下頭，小聲說：「……今天是七月二十六日。」'),
-    '「……今天是七月二十六日。」',
+    '她低下頭，小聲說：「……今天是七月二十六日。」',
   );
 });
 
-test('removes unquoted third-person narration', () => {
+test('does not remove unparenthesized narration', () => {
   assert.equal(
     formatDialogueOnly('Kuro的貓耳動了一下。\n……我知道了。'),
-    '……我知道了。',
+    'Kuro的貓耳動了一下。\n……我知道了。',
+  );
+});
+
+test('does not remove asterisk stage directions', () => {
+  assert.equal(
+    formatDialogueOnly('*耳朵輕輕抖了一下*\n……嗯。'),
+    '*耳朵輕輕抖了一下*\n……嗯。',
+  );
+});
+
+test('preserves Chinese quotation marks used inside ordinary speech', () => {
+  assert.equal(
+    formatDialogueOnly(
+      '夜之國像「記憶的圖書館」，也是「已經結束的時間的墳墓」。',
+    ),
+    '夜之國像「記憶的圖書館」，也是「已經結束的時間的墳墓」。',
   );
 });

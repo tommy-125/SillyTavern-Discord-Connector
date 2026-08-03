@@ -149,13 +149,24 @@ function requestHeaders(request) {
   for (const [name, value] of Object.entries(request.headers)) {
     if (
       value == null ||
-      ["host", "content-length", "connection", "accept-encoding"].includes(name)
+      ["host", "content-length", "connection", "accept-encoding", "x-kuro-metrics-skip"].includes(name)
     ) {
       continue;
     }
     headers.set(name, Array.isArray(value) ? value.join(", ") : value);
   }
   return headers;
+}
+
+function shouldTrackGeneration(method, requestUrl, headers = {}) {
+  const isGeneration =
+    method === "POST" &&
+    new URL(requestUrl, "http://metrics-proxy.invalid").pathname.endsWith(
+      "/chat/completions",
+    );
+  const skipMetrics =
+    String(headers["x-kuro-metrics-skip"] || "").toLowerCase() === "true";
+  return isGeneration && !skipMetrics;
 }
 
 function responseHeaders(upstream) {
@@ -226,6 +237,11 @@ async function proxyRequest(request, response) {
     new URL(request.url, "http://metrics-proxy.invalid").pathname.endsWith(
       "/chat/completions",
     );
+  const trackGeneration = shouldTrackGeneration(
+    request.method,
+    request.url,
+    request.headers,
+  );
   let body = ["GET", "HEAD"].includes(request.method) ? undefined : await readBody(request);
   let requestedModel = "";
   let streamed = false;
@@ -281,7 +297,7 @@ async function proxyRequest(request, response) {
     for await (const chunk of upstream) {
       const buffer = Buffer.from(chunk);
       response.write(buffer);
-      if (isGeneration) {
+      if (trackGeneration) {
         if (contentType.includes("text/event-stream")) {
           parseSseEvents(sseState, decoder.decode(buffer, { stream: true }).replace(/\r\n/g, "\n"), inspectPayload);
         } else if (responseBytes < MAX_BODY_BYTES) {
@@ -293,7 +309,7 @@ async function proxyRequest(request, response) {
   }
   response.end();
 
-  if (!isGeneration) return;
+  if (!trackGeneration) return;
   if (!contentType.includes("text/event-stream") && responseChunks.length) {
     try {
       inspectPayload(JSON.parse(Buffer.concat(responseChunks).toString("utf8")));
@@ -364,6 +380,7 @@ module.exports = {
   claimRecords,
   parseSseEvents,
   routingFromPayload,
+  shouldTrackGeneration,
   requestUpstream,
   startServer,
   usageFromPayload,

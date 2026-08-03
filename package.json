@@ -36,6 +36,7 @@
     "install-server": "cd server && npm install",
     "test-release": "npm run verify-release",
     "start": "cd server && node server.js",
+    "test-character-seed": "node --test deploy/character-seed/seed.test.mjs",
     "configure-runtime-secret": "node scripts/configure-runtime-secret.mjs",
     "release-checklist": "node scripts/release-checklist.js"
   },

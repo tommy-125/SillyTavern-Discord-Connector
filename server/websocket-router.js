@@ -34,6 +34,7 @@ async function handleBridgePacket(data, deps) {
     setCrossRelayEnabled,
     rememberTurn,
     claimProviderMetrics,
+    resolveRawReplies,
     log,
   } = deps;
 
@@ -58,6 +59,11 @@ async function handleBridgePacket(data, deps) {
     if (data.personaName) setCurrentPersonaName(String(data.personaName));
     if (data.crossPlatformRelay !== undefined)
       setCrossRelayEnabled(data.crossPlatformRelay);
+    return;
+  }
+
+  if (data.type === "raw_replies_response") {
+    resolveRawReplies?.(data.requestId, data.entries);
     return;
   }
 
@@ -261,9 +267,20 @@ async function handleBridgePacket(data, deps) {
             userText: data.userText,
             assistantText: delivered.join("\n\n"),
           }),
-        ).catch((error) =>
-          log("warn", `[Memory] Could not submit turn: ${error.message}`),
-        );
+        )
+          .then((result) => {
+            if (!result?.metrics) return null;
+            const sourceRequestId = String(data.requestId || "");
+            return fanout(conversationId, "sendMetric", {
+              requestId: `${sourceRequestId}:memory`,
+              sourceRequestId,
+              operation: "memory_extraction",
+              metrics: result.metrics,
+            });
+          })
+          .catch((error) =>
+            log("warn", `[Memory] Could not submit turn: ${error.message}`),
+          );
       }
       break;
     }

@@ -7,16 +7,22 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastembed import TextEmbedding
 from pydantic import BaseModel, Field
 
 from extraction_rules import CATEGORY_LABELS, normalize_channel_id, validate_operations
+from memory_candidates import (
+    build_candidate_messages,
+    candidate_operations,
+    local_skip_reason,
+)
 from memory_store import MemoryStore, make_namespace
 
 
@@ -32,6 +38,10 @@ EMBEDDING_MODEL = os.getenv(
     "BAAI/bge-small-zh-v1.5",
 )
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_BASE_URL = os.getenv(
+    "OPENROUTER_BASE_URL",
+    "https://openrouter.ai/api/v1",
+).strip().rstrip("/")
 OPENROUTER_MODEL = os.getenv(
     "MEMORY_EXTRACTION_MODEL",
     os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
@@ -324,14 +334,11 @@ async def recall(request: RecallRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/v1/turns", status_code=202)
-async def remember_turn(
-    request: TurnRequest,
-    background_tasks: BackgroundTasks,
-) -> dict[str, str]:
+@app.post("/v1/turns")
+async def remember_turn(request: TurnRequest) -> dict[str, Any]:
     _store()
-    background_tasks.add_task(_extract_and_apply, request.model_dump())
-    return {"status": "accepted", "request_id": request.request_id}
+    result = await _extract_and_apply(request.model_dump())
+    return {"request_id": request.request_id, **result}
 
 
 @app.post("/v1/maintenance")
@@ -518,13 +525,103 @@ def _extract_json(text: str) -> dict[str, Any]:
     return value
 
 
-async def _extract_and_apply(turn: dict[str, Any]) -> None:
+def _safe_usage_number(value: Any) -> int | float:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)) and value >= 0:
+        return value
+    return 0
+
+
+def _memory_extraction_metrics(
+    payload: dict[str, Any] | None,
+    duration_ms: int,
+    status: str,
+    status_code: int = 0,
+) -> dict[str, Any]:
+    payload = payload or {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    completion_details = usage.get("completion_tokens_details")
+    if not isinstance(completion_details, dict):
+        completion_details = {}
+    prompt_details = usage.get("prompt_tokens_details")
+    if not isinstance(prompt_details, dict):
+        prompt_details = {}
+    metadata = payload.get("openrouter_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    attempts = metadata.get("attempts") if isinstance(metadata.get("attempts"), list) else []
+    successful_attempt = next(
+        (
+            attempt
+            for attempt in reversed(attempts)
+            if isinstance(attempt, dict)
+            and 200 <= int(_safe_usage_number(attempt.get("status"))) < 300
+        ),
+        {},
+    )
+    endpoints = metadata.get("endpoints")
+    endpoints = endpoints.get("available") if isinstance(endpoints, dict) else []
+    selected_endpoint = next(
+        (
+            endpoint
+            for endpoint in endpoints or []
+            if isinstance(endpoint, dict) and endpoint.get("selected") is True
+        ),
+        {},
+    )
+    prompt_tokens = int(_safe_usage_number(usage.get("prompt_tokens")))
+    completion_tokens = int(_safe_usage_number(usage.get("completion_tokens")))
+    total_tokens = int(
+        _safe_usage_number(usage.get("total_tokens"))
+        or prompt_tokens + completion_tokens
+    )
+    return {
+        "status": status,
+        "model": str(payload.get("model") or OPENROUTER_MODEL),
+        "provider": str(
+            selected_endpoint.get("provider")
+            or successful_attempt.get("provider")
+            or payload.get("provider")
+            or ""
+        ),
+        "providerModel": str(
+            selected_endpoint.get("model")
+            or successful_attempt.get("model")
+            or ""
+        ),
+        "routingStrategy": str(metadata.get("strategy") or ""),
+        "routingRegion": str(metadata.get("region") or ""),
+        "routingAttempt": int(_safe_usage_number(metadata.get("attempt"))),
+        "providerStatusCode": status_code,
+        "usageAvailable": bool(usage),
+        "promptTokens": prompt_tokens,
+        "completionTokens": completion_tokens,
+        "totalTokens": total_tokens,
+        "reasoningTokens": int(
+            _safe_usage_number(
+                completion_details.get("reasoning_tokens")
+                or usage.get("reasoning_tokens")
+            )
+        ),
+        "cachedTokens": int(
+            _safe_usage_number(
+                prompt_details.get("cached_tokens") or usage.get("cached_tokens")
+            )
+        ),
+        "costUsd": float(_safe_usage_number(usage.get("cost"))),
+        "generationCount": 1,
+        "providerDurationMs": max(0, duration_ms),
+    }
+
+
+async def _extract_and_apply(turn: dict[str, Any]) -> dict[str, Any]:
     if not OPENROUTER_API_KEY:
         logger.warning("Skipping memory extraction: OPENROUTER_API_KEY is empty")
-        return
+        return {"status": "skipped", "metrics": None}
     store = runtime.store
     if store is None:
-        return
+        return {"status": "skipped", "metrics": None}
 
     namespace = make_namespace(turn["character_id"])
     participant_candidates = [
@@ -567,88 +664,45 @@ async def _extract_and_apply(turn: dict[str, Any]) -> None:
         turn["character_id"],
         known_participants,
     )
-    extraction_query = "\n".join(
-        value
-        for value in [
-            turn.get("recent_context", ""),
-            f'[{turn.get("display_name", "")}] {turn.get("user_text", "")}',
-        ]
-        if value
-    )[-4000:]
-    existing = await asyncio.to_thread(
-        store.recall,
-        turn["character_id"],
-        extraction_query,
-        10,
-        turn.get("channel_id", ""),
-        [participant["id"] for participant in known_participants],
-    )
-    existing_payload = [
-        {
-            "id": item["id"],
-            "scope": item.get("scope_type", "channel"),
-            "scope_id": item.get("scope_id", ""),
-            "category": item["category"],
-            "attribute_key": item["memory_key"],
-            "summary": item["memory_value"],
-            "participants": item.get("participants", []),
-        }
-        for item in existing
-    ]
-    source = {
-        "channel_id": normalize_channel_id(turn.get("channel_id", "")),
-        "current_speaker": known_participants[0],
-        "known_participants": known_participants,
-        "recent_channel_context": turn.get("recent_context", ""),
-        "user_message": turn["user_text"],
-        "assistant_reply": turn["assistant_text"],
-    }
-    system_prompt = """你是 Kuro 的事件型長期記憶整理器。只輸出嚴格 JSON：
-{"operations":[{"action":"ADD|UPDATE|DELETE|NOOP","id":"更新或刪除時填既有ID，否則空字串","scope":"channel|global","category":"conversation_event|user_preference|plan_task|relationship_milestone|decision|summary","attribute_key":"穩定且具體的欄位名稱","summary":"第三人稱、簡短、自足的事件摘要","participants":[{"id":"known_participants 中的穩定ID","display_name":"可讀名稱","role":"speaker|mentioned|participant|assistant"}],"importance":0到1,"confidence":0到1}]}
+    skip_reason = local_skip_reason(turn)
+    if skip_reason:
+        logger.info(
+            "Skipped memory extraction for request %s: %s",
+            turn.get("request_id", ""),
+            skip_reason,
+        )
+        return {"status": "skipped", "reason": skip_reason, "metrics": None}
 
-規則：
-1. 記憶主體是事件或陳述，不是使用者檔案；使用者只能列為 participants。
-2. conversation_event 保存日後值得回想的明確事件；user_preference 只保存目前說話者親口明確表達且相對穩定的喜好；plan_task 保存具體計畫或待辦；relationship_milestone 只保存明確且重要的關係轉折；decision 保存已做出的群組或專案決定；summary 整合近期多段相關對話。
-3. 預設 scope=channel。只有跨頻道確實有用且重要的專案決定或階段摘要才可使用 global。
-4. participants 必須使用 known_participants 的 ID。不要因為某人參與事件，就替他建立人物檔案。
-5. assistant_reply 只協助理解對話結果。Kuro 自稱、喜好、情緒、動作、推測或主動補充的內容不能成為記憶；Kuro 的設定由角色卡負責。
-6. 問句不是事實。「你是千和還是小黑」與「小黑就是啊」這類稱呼或身分對話輸出 NOOP。
-7. 不保存問候、一次性問題、短暫情緒、普通閒聊、玩笑、重複內容、密碼、token、API key 或其他秘密。沒有長期價值時輸出 NOOP。
-8. user_preference 必須可在本次 user_message 找到第一人稱明確證據，例如「我喜歡紅豆冰棒」；不得從助手回覆或近期他人訊息推導。
-9. 同一 attribute_key 的新內容取代既有記憶時使用 UPDATE 並指定 id；明確撤回時使用 DELETE。不同事件不要互相覆蓋。
-10. 不要解釋，不要 Markdown，只輸出 JSON。"""
-    user_prompt = json.dumps(
-        {"existing_memories": existing_payload, "new_turn": source},
-        ensure_ascii=False,
-    )
     body = {
         "model": OPENROUTER_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": build_candidate_messages(turn, known_participants),
         "temperature": 0,
-        "max_tokens": 800,
+        "max_tokens": 350,
         "reasoning": {"effort": "none", "exclude": True},
     }
 
+    started_at = time.perf_counter()
+    payload: dict[str, Any] | None = None
+    status_code = 0
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                f"{OPENROUTER_BASE_URL}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
                     "X-Title": "Kuro Discord Memory",
+                    "X-Kuro-Metrics-Skip": "true",
                 },
                 json=body,
             )
+            status_code = response.status_code
             response.raise_for_status()
             payload = response.json()
         content = payload["choices"][0]["message"]["content"]
         extracted = _extract_json(content)
         operations, rejected = validate_operations(
-            extracted.get("operations", []), turn, known_participants
+            candidate_operations(extracted), turn, known_participants
         )
         if rejected:
             logger.info(
@@ -669,5 +723,25 @@ async def _extract_and_apply(turn: dict[str, Any]) -> None:
             namespace,
             result,
         )
+        duration_ms = round((time.perf_counter() - started_at) * 1000)
+        return {
+            "status": "completed",
+            "metrics": _memory_extraction_metrics(
+                payload,
+                duration_ms,
+                "success",
+                status_code,
+            ),
+        }
     except Exception:
         logger.exception("Memory extraction failed for request %s", turn.get("request_id", ""))
+        duration_ms = round((time.perf_counter() - started_at) * 1000)
+        return {
+            "status": "failed",
+            "metrics": _memory_extraction_metrics(
+                payload,
+                duration_ms,
+                "error",
+                status_code,
+            ),
+        }

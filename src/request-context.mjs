@@ -43,5 +43,7 @@ export function buildRequestContextPrompt({
     `目前日期時間：${formatted.date} ${formatted.time}（${formatted.weekday}，${timeZone}）。`,
     `目前對話者的顯示名稱是「${name.replace(/[「」]/g, '')}」，Kuro稱呼對方時使用這個名稱。`,
     `「${name.replace(/[「」]/g, '')}」與奏大雅是兩個不同的人；與大雅的回憶、承諾與戀慕關係不屬於目前對話者，目前對話者也不是大雅的替代者。`,
+    '',
+    '輸出格式：只輸出小黑實際說出的台詞。',
   ].join('\n');
 }

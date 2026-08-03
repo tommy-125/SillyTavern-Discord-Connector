@@ -60,7 +60,13 @@ test("rememberTurn submits extraction after generation", async () => {
     enabled: true,
     fetchImpl: async (_url, options) => {
       requestBody = JSON.parse(options.body);
-      return { ok: true, json: async () => ({ status: "accepted" }) };
+      return {
+        ok: true,
+        json: async () => ({
+          status: "completed",
+          metrics: { totalTokens: 321, costUsd: 0.0001 },
+        }),
+      };
     },
   });
   const saved = await client.rememberTurn({
@@ -77,7 +83,8 @@ test("rememberTurn submits extraction after generation", async () => {
     userText: "我喜歡咖啡",
     assistantText: "……記住了。",
   });
-  assert.equal(saved, true);
+  assert.equal(saved.status, "completed");
+  assert.equal(saved.metrics.totalTokens, 321);
   assert.equal(requestBody.user_text, "我喜歡咖啡");
   assert.deepEqual(requestBody.mentioned_users, [
     { id: "u2", display_name: "Tommy" },

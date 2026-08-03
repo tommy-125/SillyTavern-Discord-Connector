@@ -40,8 +40,8 @@ test("createConfig applies timeout defaults and derived millisecond fields", () 
   assert.equal(config.queueTaskTimeoutMs, 60000);
   assert.equal(config.imagePlaceholderTimeoutSeconds, 180);
   assert.equal(config.imagePlaceholderTimeoutMs, 180000);
-  assert.equal(config.recentChannelTokenBudget, 500);
-  assert.equal(config.memoryTokenBudget, 400);
+  assert.equal(config.dynamicContextTokenBudget, 1200);
+  assert.equal(config.memorySoftTokenBudget, 400);
   assert.equal(config.streamResponses, false);
   assert.equal(config.dialogueOnlyResponses, false);
   assert.deepEqual(warnings, []);
@@ -152,12 +152,16 @@ test("createConfig throws for invalid image placeholder timeout", () => {
 
 test("createConfig rejects invalid dynamic prompt token budgets", () => {
   assert.throws(
-    () => createConfig({ recentChannelTokenBudget: 0 }),
-    /recentChannelTokenBudget must be a positive integer/,
+    () => createConfig({ dynamicContextTokenBudget: 0 }),
+    /dynamicContextTokenBudget must be a positive integer/,
   );
   assert.throws(
-    () => createConfig({ memoryTokenBudget: 4.5 }),
-    /memoryTokenBudget must be a positive integer/,
+    () => createConfig({ memorySoftTokenBudget: 4.5 }),
+    /memorySoftTokenBudget must be a positive integer/,
+  );
+  assert.throws(
+    () => createConfig({ dynamicContextTokenBudget: 300, memorySoftTokenBudget: 400 }),
+    /memorySoftTokenBudget must not exceed dynamicContextTokenBudget/,
   );
 });
 

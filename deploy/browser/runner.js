@@ -55,6 +55,9 @@ const PROMPT_SNAPSHOT_DISPLAY_NAME = (
 const PROMPT_SNAPSHOT_RECENT_CONTEXT = (
   process.env.CONNECTOR_PROMPT_SNAPSHOT_RECENT_CONTEXT || ""
 ).trim();
+const PROMPT_SNAPSHOT_VISION_CONTEXT = (
+  process.env.CONNECTOR_PROMPT_SNAPSHOT_VISION_CONTEXT || ""
+).trim();
 const PROMPT_SNAPSHOT_MEMORY_CONTEXT = (
   process.env.CONNECTOR_PROMPT_SNAPSHOT_MEMORY_CONTEXT || ""
 ).trim();
@@ -473,15 +476,19 @@ async function capturePromptSnapshot(page) {
     const { buildRequestContextPrompt } = await import(
       "/scripts/extensions/third-party/KuroHelper-AI-Runtime/src/request-context.mjs"
     );
-    const { buildBudgetedDynamicContexts } = await import(
+    const { buildBudgetedDynamicHistory } = await import(
       "/scripts/extensions/third-party/KuroHelper-AI-Runtime/src/prompt-budget.mjs"
     );
-    const { suppressPreviousChatMessages } = await import(
+    const {
+      injectDiscordPromptHistory,
+      suppressPreviousChatMessages,
+    } = await import(
       "/scripts/extensions/third-party/KuroHelper-AI-Runtime/src/prompt-history.mjs"
     );
     const promptKeys = {
       request: "discord_connector_request_context",
       recent: "discord_connector_recent_channel_context",
+      vision: "discord_connector_vision_context",
       memory: "discord_connector_long_term_memory",
     };
     const promptOptions = [
@@ -506,20 +513,38 @@ async function capturePromptSnapshot(page) {
       sillyTavern.chat,
       sillyTavern.symbols?.ignore ?? Symbol.for("ignore"),
     );
-    const dynamicContexts = buildBudgetedDynamicContexts({
-      recentChannelContext: input.recentChannelContext,
+    const recentMessages = String(input.recentChannelContext || "")
+      .split(/\r?\n/)
+      .map((line, index) => {
+        const match = line.trim().match(/^\[([^\]]+)\]\s*(.+)$/);
+        if (!match) return null;
+        if (
+          match[1] === "Kuro"
+          && match[2] === "已開始新的短期對話；長期記憶不會被刪除。"
+        ) return null;
+        return {
+          id: `snapshot-${index}`,
+          displayName: match[1],
+          content: match[2],
+          assistant: match[1] === "Kuro",
+        };
+      })
+      .filter(Boolean);
+    const dynamicContexts = buildBudgetedDynamicHistory({
+      recentMessages,
+      visionContext: input.visionContext,
       memoryContext: input.memoryContext,
-      recentTokenBudget: input.recentTokenBudget,
-      memoryTokenBudget: input.memoryTokenBudget,
+      dynamicContextTokenBudget: input.dynamicContextTokenBudget,
+      memorySoftTokenBudget: input.memorySoftTokenBudget,
     });
+    const restoreDiscordHistory = injectDiscordPromptHistory(
+      sillyTavern.chat,
+      dynamicContexts.recentMessages,
+      dynamicContexts.currentImageContext,
+    );
     sillyTavern.setExtensionPrompt(
       promptKeys.request,
       buildRequestContextPrompt({ displayName: input.displayName }),
-      ...promptOptions,
-    );
-    sillyTavern.setExtensionPrompt(
-      promptKeys.recent,
-      dynamicContexts.recentChannelContext,
       ...promptOptions,
     );
     sillyTavern.setExtensionPrompt(
@@ -552,6 +577,7 @@ async function capturePromptSnapshot(page) {
       await sillyTavern.Generate("normal", {}, true);
       return await captured;
     } finally {
+      restoreDiscordHistory();
       restoreHistory();
       for (const key of Object.values(promptKeys)) {
         sillyTavern.setExtensionPrompt(key, "", ...promptOptions);
@@ -562,9 +588,10 @@ async function capturePromptSnapshot(page) {
     testMessage: PROMPT_SNAPSHOT_TEST_MESSAGE,
     displayName: PROMPT_SNAPSHOT_DISPLAY_NAME,
     recentChannelContext: PROMPT_SNAPSHOT_RECENT_CONTEXT,
+    visionContext: PROMPT_SNAPSHOT_VISION_CONTEXT,
     memoryContext: PROMPT_SNAPSHOT_MEMORY_CONTEXT,
-    recentTokenBudget: 500,
-    memoryTokenBudget: 400,
+    dynamicContextTokenBudget: 1200,
+    memorySoftTokenBudget: 400,
   });
 
   await fs.mkdir(path.dirname(PROMPT_SNAPSHOT_PATH), { recursive: true });
@@ -577,6 +604,7 @@ async function capturePromptSnapshot(page) {
         testMessage: PROMPT_SNAPSHOT_TEST_MESSAGE || null,
         displayName: PROMPT_SNAPSHOT_DISPLAY_NAME || null,
         recentChannelContext: PROMPT_SNAPSHOT_RECENT_CONTEXT || null,
+        visionContext: PROMPT_SNAPSHOT_VISION_CONTEXT || null,
         memoryContext: PROMPT_SNAPSHOT_MEMORY_CONTEXT || null,
         messages: snapshot,
       },

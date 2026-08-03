@@ -30,8 +30,8 @@ function createConfig(rawConfig) {
     wssPort: 2333,
     queueTaskTimeoutSeconds: 60,
     imagePlaceholderTimeoutSeconds: 180,
-    recentChannelTokenBudget: 500,
-    memoryTokenBudget: 400,
+    dynamicContextTokenBudget: 1200,
+    memorySoftTokenBudget: 400,
     streamResponses: false,
     dialogueOnlyResponses: false,
     ...rawConfig,
@@ -99,10 +99,18 @@ function createConfig(rawConfig) {
     );
   }
 
-  for (const key of ['recentChannelTokenBudget', 'memoryTokenBudget']) {
+  for (const key of [
+    'dynamicContextTokenBudget',
+    'memorySoftTokenBudget',
+  ]) {
     if (!Number.isInteger(config[key]) || config[key] <= 0) {
       throw new Error(`config.${key} must be a positive integer token count.`);
     }
+  }
+  if (config.memorySoftTokenBudget > config.dynamicContextTokenBudget) {
+    throw new Error(
+      "config.memorySoftTokenBudget must not exceed dynamicContextTokenBudget.",
+    );
   }
 
   for (const [platform, pluginCfg] of Object.entries(config.plugins || {})) {

@@ -2,28 +2,28 @@ name: kurohelper-ai-runtime
 
 services:
   character-seed:
-    image: alpine:3.23
+    image: node:22-alpine
     container_name: sillytavern-character-seed
     restart: "no"
     environment:
       ST_CHARACTER_FILE_NAME: ${ST_CHARACTER_FILE_NAME:-Kuro.png}
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        target="/data/default-user/characters/$${ST_CHARACTER_FILE_NAME}"
-        mkdir -p "$$(dirname "$${target}")"
-        if [ ! -f "$${target}" ] || ! cmp -s /seed/character.png "$${target}"; then
-          cp /seed/character.png "$${target}"
-          chmod 0644 "$${target}"
-          echo "Synchronized character card: $${target}"
-        else
-          echo "Character card is already current: $${target}"
-        fi
+      ST_CHARACTER_WORLD_NAME: ${ST_CHARACTER_WORLD_NAME:-Kuro}
+      ST_CHARACTER_LOREBOOK_POSITION: ${ST_CHARACTER_LOREBOOK_POSITION:-4}
+      ST_CHARACTER_LOREBOOK_DEPTH: ${ST_CHARACTER_LOREBOOK_DEPTH:-4}
+      ST_CHARACTER_LOREBOOK_ROLE: ${ST_CHARACTER_LOREBOOK_ROLE:-0}
+    command: ["node", "/seed-script/seed.mjs"]
     volumes:
       - type: bind
         source: ${ST_CHARACTER_CARD_PATH:-../../kuro/kuro-character/Kuro-character-card-gpt-5.6-sol/Kuro_chara_card.discord.dedup.png}
         target: /seed/character.png
+        read_only: true
+      - type: bind
+        source: ${ST_CHARACTER_CARD_JSON_PATH:-../../kuro/kuro-character/Kuro-character-card-gpt-5.6-sol/Kuro_chara_card.discord.dedup.json}
+        target: /seed/character.json
+        read_only: true
+      - type: bind
+        source: ./deploy/character-seed/seed.mjs
+        target: /seed-script/seed.mjs
         read_only: true
       - ./runtime/sillytavern/data:/data
 
@@ -96,8 +96,11 @@ services:
       VISION_MODEL: ${VISION_MODEL:-google/gemini-2.5-flash-lite}
       VISION_API_BASE_URL: http://metrics-proxy:8081/v1
       VISION_MAX_IMAGES: ${VISION_MAX_IMAGES:-4}
-      VISION_MAX_OUTPUT_TOKENS: ${VISION_MAX_OUTPUT_TOKENS:-400}
+      VISION_MAX_OUTPUT_TOKENS: ${VISION_MAX_OUTPUT_TOKENS:-500}
       VISION_TIMEOUT_MS: ${VISION_TIMEOUT_MS:-30000}
+      VISION_CACHE_ENABLED: ${VISION_CACHE_ENABLED:-true}
+      VISION_CACHE_TTL_SECONDS: ${VISION_CACHE_TTL_SECONDS:-3600}
+      VISION_CACHE_MAX_ENTRIES: ${VISION_CACHE_MAX_ENTRIES:-256}
       KUROHELPER_API_HOST: 0.0.0.0
       KUROHELPER_API_PORT: 2334
       KUROHELPER_BRIDGE_SECRET: ${KUROHELPER_BRIDGE_SECRET:-}
@@ -120,6 +123,9 @@ services:
     image: ${MEMORY_IMAGE:-local/kuro-memory-service}:1.0.0
     container_name: kuro-memory-service
     restart: unless-stopped
+    depends_on:
+      metrics-proxy:
+        condition: service_healthy
     environment:
       MEMORY_DATA_DIR: /data
       MEMORY_EMBEDDING_MODEL: ${MEMORY_EMBEDDING_MODEL:-BAAI/bge-small-zh-v1.5}
@@ -131,6 +137,7 @@ services:
       MEMORY_BACKUP_RETENTION_COUNT: ${MEMORY_BACKUP_RETENTION_COUNT:-5}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_BASE_URL: http://metrics-proxy:8081/v1
       TZ: ${TZ:-Asia/Taipei}
     expose:
       - "8090"
@@ -188,13 +195,14 @@ services:
       CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE: ${CONNECTOR_PROMPT_SNAPSHOT_TEST_MESSAGE:-}
       CONNECTOR_PROMPT_SNAPSHOT_DISPLAY_NAME: ${CONNECTOR_PROMPT_SNAPSHOT_DISPLAY_NAME:-}
       CONNECTOR_PROMPT_SNAPSHOT_RECENT_CONTEXT: ${CONNECTOR_PROMPT_SNAPSHOT_RECENT_CONTEXT:-}
+      CONNECTOR_PROMPT_SNAPSHOT_VISION_CONTEXT: ${CONNECTOR_PROMPT_SNAPSHOT_VISION_CONTEXT:-}
       CONNECTOR_PROMPT_SNAPSHOT_MEMORY_CONTEXT: ${CONNECTOR_PROMPT_SNAPSHOT_MEMORY_CONTEXT:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_PROXY_URL: http://metrics-proxy:8081/v1
       OPENROUTER_REASONING_EFFORT: ${OPENROUTER_REASONING_EFFORT:-auto}
       OPENROUTER_SHOW_THOUGHTS: ${OPENROUTER_SHOW_THOUGHTS:-false}
-      ST_DEFAULT_CHARACTER: ${ST_DEFAULT_CHARACTER:-Kuro}
+      ST_DEFAULT_CHARACTER: ${ST_DEFAULT_CHARACTER:-小黑}
       ST_DEFAULT_PERSONA: ${ST_DEFAULT_PERSONA:-User}
       ST_UI_LANGUAGE: ${ST_UI_LANGUAGE:-en}
       TZ: ${TZ:-Asia/Taipei}

@@ -105,22 +105,38 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
         channelId: "channel-1",
         userId: "user-1",
         text: "hello",
+        recentMessages: [{
+          id: "recent-1",
+          userId: "user-2",
+          displayName: "Bob",
+          content: "earlier question",
+          assistant: false,
+          createdAt: "2026-08-01T01:00:00Z",
+        }],
         images: [{
           id: "image-1",
           url: "https://cdn.discordapp.com/attachments/a/b/image.png",
           filename: "image.png",
           contentType: "image/png",
           size: 1234,
+          messageId: "message-1",
+          authorName: "Alice",
+          contextOnly: true,
         }],
       },
     }));
     await dispatchedPromise;
+    assert.equal(receivedMetadata.recentMessages.length, 1);
+    assert.equal(receivedMetadata.recentMessages[0].displayName, "Bob");
     assert.deepEqual(receivedMetadata.images, [{
       id: "image-1",
       url: "https://cdn.discordapp.com/attachments/a/b/image.png",
       filename: "image.png",
       contentType: "image/png",
       size: 1234,
+      messageId: "message-1",
+      authorName: "Alice",
+      contextOnly: true,
     }]);
     const responsePromise = waitForMessage(socket);
     await plugin.sendText("channel-1", "reply", {
@@ -134,6 +150,92 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
     assert.equal(response.payload.text, "reply");
     assert.equal(response.payload.metrics.totalTokens, 42);
     assert.equal(response.payload.metrics.costUsd, 0.001);
+    socket.close();
+  } finally {
+    await plugin.stop();
+  }
+});
+
+test("KuroHelper transport sends background memory metrics", async () => {
+  const port = await reservePort();
+  const plugin = createKuroHelperPlugin(
+    {
+      isSillyTavernReady: () => true,
+      onUserMessage: async () => true,
+      log: () => {},
+    },
+    { host: "127.0.0.1", port, secret: "test-secret" },
+  );
+  await plugin.start();
+
+  try {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      headers: { Authorization: "Bearer test-secret" },
+    });
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const responsePromise = waitForMessage(socket);
+    await plugin.sendMetric("channel-1", {
+      requestId: "generation-1:memory",
+      operation: "memory_extraction",
+      metrics: {
+        status: "success",
+        promptTokens: 300,
+        completionTokens: 21,
+        totalTokens: 321,
+        costUsd: 0.0001,
+      },
+    });
+    const response = await responsePromise;
+    assert.equal(response.type, "metric_event");
+    assert.equal(response.requestId, "generation-1:memory");
+    assert.equal(response.payload.channelId, "channel-1");
+    assert.equal(response.payload.operation, "memory_extraction");
+    assert.equal(response.payload.metrics.totalTokens, 321);
+    socket.close();
+  } finally {
+    await plugin.stop();
+  }
+});
+
+test("KuroHelper transport returns the raw reply cache", async () => {
+  const port = await reservePort();
+  const entries = [{
+    cachedAt: "2026-08-02T01:02:03.000Z",
+    rawText: "……（低下頭）嗯。",
+  }];
+  const plugin = createKuroHelperPlugin(
+    {
+      isSillyTavernReady: () => true,
+      listRawReplies: async () => ({ entries }),
+      onUserMessage: async () => false,
+      log: () => {},
+    },
+    { host: "127.0.0.1", port, secret: "test-secret" },
+  );
+  await plugin.start();
+
+  try {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      headers: { Authorization: "Bearer test-secret" },
+    });
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const responsePromise = waitForMessage(socket);
+    socket.send(JSON.stringify({
+      version: 1,
+      type: "raw_replies_request",
+      requestId: "raw-1",
+      payload: {},
+    }));
+    const response = await responsePromise;
+    assert.equal(response.type, "raw_replies_response");
+    assert.equal(response.requestId, "raw-1");
+    assert.deepEqual(response.payload.entries, entries);
     socket.close();
   } finally {
     await plugin.stop();

@@ -10,6 +10,10 @@ test('buildRequestContextPrompt formats Taipei time and separates the user from 
   assert.match(prompt, /2026-07-31 11:34（星期五，Asia\/Taipei）/);
   assert.match(prompt, /顯示名稱是「肉圓」/);
   assert.match(prompt, /肉圓.*奏大雅是兩個不同的人/);
+  assert.doesNotMatch(prompt, /禁止|不得描寫|不得描述/);
+  assert.match(prompt, /輸出格式：只輸出小黑實際說出的台詞。/);
+  assert.doesNotMatch(prompt, /害羞、猶豫與停頓只用/);
+  assert.match(prompt, /輸出格式：只輸出小黑實際說出的台詞。$/);
 });
 
 test('buildRequestContextPrompt removes control characters from display names', () => {

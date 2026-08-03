@@ -30,10 +30,16 @@ function createDeps(overrides = {}) {
       async streamEnd(chatId) {
         calls.push(["discord", "streamEnd", chatId]);
       },
+      async sendMetric(chatId, event) {
+        calls.push(["discord", "sendMetric", chatId, event]);
+      },
     },
     telegram: {
       async sendText(chatId, text) {
         calls.push(["telegram", "sendText", chatId, text]);
+      },
+      async sendMetric(chatId, event) {
+        calls.push(["telegram", "sendMetric", chatId, event]);
       },
     },
   };
@@ -191,6 +197,26 @@ test("handleBridgePacket completes marker-only ai_reply with a retry message", a
   assert.ok(sends.every((call) => call[3] === "模型沒有產生可用的回覆，請再試一次。"));
 });
 
+test("handleBridgePacket resolves raw reply cache responses without a chat id", async () => {
+  let resolved;
+  await handleBridgePacket(
+    {
+      type: "raw_replies_response",
+      requestId: "raw-1",
+      entries: [{ rawText: "raw reply" }],
+    },
+    createDeps({
+      resolveRawReplies: (requestId, entries) => {
+        resolved = { requestId, entries };
+      },
+    }),
+  );
+  assert.deepEqual(resolved, {
+    requestId: "raw-1",
+    entries: [{ rawText: "raw reply" }],
+  });
+});
+
 test("handleBridgePacket does not prefix the character name", async () => {
   const deps = createDeps();
 
@@ -211,7 +237,13 @@ test("handleBridgePacket does not prefix the character name", async () => {
 test("handleBridgePacket submits a completed turn to long-term memory", async () => {
   const turns = [];
   const deps = createDeps({
-    rememberTurn: async (turn) => turns.push(turn),
+    rememberTurn: async (turn) => {
+      turns.push(turn);
+      return {
+        status: "completed",
+        metrics: { status: "success", totalTokens: 321, costUsd: 0.0001 },
+      };
+    },
   });
 
   await handleBridgePacket(
@@ -240,6 +272,12 @@ test("handleBridgePacket submits a completed turn to long-term memory", async ()
   ]);
   assert.equal(turns[0].recentContext, "[海獺] 大家星期六有空嗎？");
   assert.equal(turns[0].assistantText, "……記住了。");
+  await new Promise((resolve) => setImmediate(resolve));
+  const metricSends = deps.__calls.filter((call) => call[1] === "sendMetric");
+  assert.equal(metricSends.length, 2);
+  assert.equal(metricSends[0][3].requestId, "request-1:memory");
+  assert.equal(metricSends[0][3].operation, "memory_extraction");
+  assert.equal(metricSends[0][3].metrics.totalTokens, 321);
 });
 
 test("handleBridgePacket removes leaked DeepSeek markers from stream chunks", async () => {

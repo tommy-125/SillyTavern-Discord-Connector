@@ -85,6 +85,7 @@ import {
   enqueueGenerationTask,
   getGenerationQueueSize,
 } from "./src/generation-queue.mjs";
+import { listRawReplyCache } from "./src/raw-reply-cache.mjs";
 
 // ---------------------------------------------------------------------------
 // Connection state (WebSocket lifecycle only - all other state is in src/)
@@ -197,18 +198,21 @@ function connect() {
           sharedState.generationTimeoutMs = data.generationTimeoutMs;
         }
         if (
-          Number.isInteger(data.recentChannelTokenBudget) &&
-          data.recentChannelTokenBudget > 0
+          Number.isInteger(data.dynamicContextTokenBudget) &&
+          data.dynamicContextTokenBudget > 0
         ) {
-          sharedState.recentChannelTokenBudget = data.recentChannelTokenBudget;
+          sharedState.dynamicContextTokenBudget = data.dynamicContextTokenBudget;
         }
-        if (Number.isInteger(data.memoryTokenBudget) && data.memoryTokenBudget > 0) {
-          sharedState.memoryTokenBudget = data.memoryTokenBudget;
+        if (
+          Number.isInteger(data.memorySoftTokenBudget) &&
+          data.memorySoftTokenBudget > 0
+        ) {
+          sharedState.memorySoftTokenBudget = data.memorySoftTokenBudget;
         }
         console.info(
           `[Discord Bridge] Generation watchdog ${sharedState.generationTimeoutMs} ms; ` +
-            `dynamic prompt budgets recent=${sharedState.recentChannelTokenBudget}, ` +
-            `memory=${sharedState.memoryTokenBudget} tokens.`,
+            `shared dynamic prompt budget=${sharedState.dynamicContextTokenBudget} tokens; ` +
+            `memory soft target=${sharedState.memorySoftTokenBudget} tokens.`,
         );
         const hasProPlugin = Object.entries(data.plugins || {}).some(
           ([platform, status]) => platform !== "discord" && status === "active",
@@ -281,6 +285,15 @@ function connect() {
 
       if (data.type === "get_autocomplete") {
         await handleGetAutocomplete(data);
+        return;
+      }
+
+      if (data.type === "raw_replies_request") {
+        safeSend({
+          type: "raw_replies_response",
+          requestId: data.requestId,
+          entries: listRawReplyCache(SillyTavern.getContext().chat),
+        });
         return;
       }
 

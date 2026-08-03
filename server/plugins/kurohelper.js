@@ -65,6 +65,9 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
       filename: String(image?.filename || "").slice(0, 255),
       contentType: String(image?.contentType || "").slice(0, 100),
       size: Math.max(0, Math.min(Number(image?.size) || 0, 10 * 1024 * 1024)),
+      messageId: String(image?.messageId || "").slice(0, 100),
+      authorName: String(image?.authorName || "").slice(0, 100),
+      contextOnly: image?.contextOnly === true,
     })).filter((image) => image.url);
   }
 
@@ -213,6 +216,19 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
       }
       return;
     }
+    if (message.type === "raw_replies_request") {
+      if (!handlers.isSillyTavernReady()) {
+        fail(socket, message.requestId, "runtime_not_ready", "SillyTavern is not connected.");
+        return;
+      }
+      try {
+        const result = await handlers.listRawReplies(message.requestId);
+        send(socket, "raw_replies_response", message.requestId, result);
+      } catch (error) {
+        fail(socket, message.requestId, "raw_replies_unavailable", error.message);
+      }
+      return;
+    }
     if (message.type !== "generate_request") {
       fail(socket, message.requestId, "unknown_type", "Unknown request type.");
       return;
@@ -275,6 +291,9 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
             ? payload.contextParticipants.slice(0, 25)
             : [],
           recentChannelContext: String(payload.recentChannelContext || ""),
+          recentMessages: Array.isArray(payload.recentMessages)
+            ? payload.recentMessages.slice(0, 50)
+            : [],
           retrievalText: String(payload.retrievalText || ""),
           images,
         },
@@ -376,6 +395,17 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
     async sendImages(chatId, images, caption) {
       const pending = findPending(chatId);
       if (pending) send(pending.socket, "images", pending.requestId, { images, caption });
+    },
+
+    async sendMetric(chatId, event = {}) {
+      const requestId = String(event.requestId || "").trim();
+      if (!requestId) return false;
+      return send(activeSocket, "metric_event", requestId, {
+        requestId,
+        channelId: String(chatId || ""),
+        operation: String(event.operation || "background"),
+        metrics: event.metrics || null,
+      });
     },
 
     async sendGeneratedImage(chatId, images, caption) {

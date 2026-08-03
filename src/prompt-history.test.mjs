@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { suppressPreviousChatMessages } from './prompt-history.mjs';
+import {
+  injectDiscordPromptHistory,
+  suppressPreviousChatMessages,
+} from './prompt-history.mjs';
 
 test('suppresses persisted messages except the current user message', () => {
   const ignore = Symbol.for('ignore-test');
@@ -37,4 +40,24 @@ test('does nothing unless the newest message is a user message', () => {
   const chat = [{ is_user: false, extra: {} }];
   suppressPreviousChatMessages(chat, ignore)();
   assert.equal(chat[0].extra[ignore], undefined);
+});
+
+test('injects Discord history as user and assistant turns then restores chat', () => {
+  const chat = [{ is_user: true, mes: '小黑 早上好' }];
+  const current = chat[0];
+  const restore = injectDiscordPromptHistory(chat, [
+    { id: '1', displayName: '肉圓', content: '小黑在不在', assistant: false },
+    { id: '2', displayName: 'Kuro', content: '……嗯。我在。', assistant: true },
+  ], '[本次附件觀察]\n圖片摘要：一隻黑貓');
+
+  assert.equal(chat.length, 3);
+  assert.equal(chat[0].is_user, true);
+  assert.equal(chat[0].mes, '[肉圓] 小黑在不在');
+  assert.equal(chat[1].is_user, false);
+  assert.equal(chat[1].mes, '……嗯。我在。');
+  assert.match(chat[2].mes, /圖片摘要：一隻黑貓/);
+
+  restore();
+  assert.deepEqual(chat, [current]);
+  assert.equal(current.mes, '小黑 早上好');
 });

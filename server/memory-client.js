@@ -89,7 +89,7 @@ function createMemoryClient(options = {}) {
       return false;
     }
     try {
-      await post(
+      const result = await post(
         "/v1/turns",
         {
           request_id: String(turn.requestId || ""),
@@ -113,9 +113,9 @@ function createMemoryClient(options = {}) {
           user_text: String(turn.userText),
           assistant_text: String(turn.assistantText),
         },
-        2_000,
+        65_000,
       );
-      return true;
+      return result;
     } catch (error) {
       log("warn", `[Memory] Background write skipped: ${error.message}`);
       return false;

@@ -16,10 +16,12 @@ module.exports = {
   // the browser page to reload instead of blocking every channel forever.
   queueTaskTimeoutSeconds: 60,
   imagePlaceholderTimeoutSeconds: 180,
-  recentChannelTokenBudget: 500,
-  memoryTokenBudget: 400,
+  // Recent Discord message bundles (text plus their image observations) and
+  // recalled memories borrow from one shared prompt budget.
+  dynamicContextTokenBudget: 1200,
+  memorySoftTokenBudget: 400,
   streamResponses: false,
-  dialogueOnlyResponses: true,
+  dialogueOnlyResponses: false,
 
   // Stable Discord IDs arrive from KuroHelper under the "kurohelper" platform.
   // Display names are used only as the human-readable Persona name.

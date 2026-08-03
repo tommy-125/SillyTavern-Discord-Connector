@@ -9,7 +9,7 @@ WORKDIR /app
 COPY memory-service/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY memory-service/app.py memory-service/extraction_rules.py memory-service/lifecycle.py memory-service/memory_store.py ./
+COPY memory-service/app.py memory-service/extraction_rules.py memory-service/lifecycle.py memory-service/memory_candidates.py memory-service/memory_store.py ./
 RUN mkdir -p /data
 
 EXPOSE 8090

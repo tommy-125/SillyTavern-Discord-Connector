@@ -16,7 +16,11 @@ const { log } = require('./logger');
 const { config, wssPort } = require('./config-loader');
 const { rememberTurn, recallMemories } = require('./memory-client');
 const { claimProviderMetrics } = require('./metrics-client');
-const { describeImages } = require('./vision-client');
+const {
+  describeImages,
+  VISION_FAILURE_REPLY,
+  visionRequestFailed,
+} = require('./vision-client');
 const { createPluginLoader } = require('./plugin-loader');
 const {
   fanout,
@@ -82,6 +86,7 @@ const cancelledImageRequests = new Set();
 const timedOutImageRequests = new Set();
 const streamHandled = new Set();
 const streamReceived = new Set();
+const pendingRawReplyRequests = new Map();
 
 function getSillyTavernClient() {
   return sillyTavernClient;
@@ -106,6 +111,29 @@ function sendToSillyTavern(payload) {
   if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN)
     return;
   sillyTavernClient.send(JSON.stringify(payload));
+}
+
+function listRawReplies(requestId) {
+  if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('SillyTavern is not connected.'));
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRawReplyRequests.delete(requestId);
+      reject(new Error('Timed out while reading raw replies.'));
+    }, 5000);
+    timer.unref?.();
+    pendingRawReplyRequests.set(requestId, { resolve, reject, timer });
+    sendToSillyTavern({ type: 'raw_replies_request', requestId });
+  });
+}
+
+function resolveRawReplies(requestId, entries) {
+  const pending = pendingRawReplyRequests.get(requestId);
+  if (!pending) return;
+  pendingRawReplyRequests.delete(requestId);
+  clearTimeout(pending.timer);
+  pending.resolve({ entries: Array.isArray(entries) ? entries.slice(-5) : [] });
 }
 
 function dispatchCommand(platform, chatId, command, args, userId) {
@@ -243,10 +271,27 @@ const pluginLoader = createPluginLoader({
     });
     const visionPromise = describeImages(metadata.images, text);
     const [memory, vision] = await Promise.all([memoryPromise, visionPromise]);
-    const recentChannelContext = [
-      metadata.recentChannelContext,
-      vision.context,
-    ].filter(Boolean).join('\n\n');
+    if (visionRequestFailed(metadata.images, vision)) {
+      log(
+        'warn',
+        `[Vision] Request ${metadata.requestId || 'unknown'} could not be described; returning the image failure reply.`,
+      );
+      const frontend = getFrontend(platform);
+      if (!frontend?.sendText) return false;
+      await frontend.sendText(chatId, VISION_FAILURE_REPLY, {
+        kind: 'ai_reply',
+        requestId: metadata.requestId || '',
+        final: true,
+        metrics: {
+          status: 'vision_error',
+          usageAvailable: false,
+          generationCount: 0,
+          memoryRecallMs: memory.elapsedMs || 0,
+        },
+      });
+      return true;
+    }
+    const recentChannelContext = metadata.recentChannelContext || '';
     sendToSillyTavern({
       type: 'user_message',
       text,
@@ -259,6 +304,11 @@ const pluginLoader = createPluginLoader({
       mentionedUsers: metadata.mentionedUsers || [],
       contextParticipants: metadata.contextParticipants || [],
       recentChannelContext,
+      recentMessages: Array.isArray(metadata.recentMessages)
+        ? metadata.recentMessages
+        : [],
+      visionContext: vision.context || '',
+      visionObservations: Array.isArray(vision.structured) ? vision.structured : [],
       memoryRecentContext: metadata.retrievalText || '',
       memoryContext: memory.context || '',
       memoryRecallMs: memory.elapsedMs || 0,
@@ -294,6 +344,7 @@ const pluginLoader = createPluginLoader({
     Boolean(
       sillyTavernClient && sillyTavernClient.readyState === WebSocket.OPEN,
     ),
+  listRawReplies,
   log,
 });
 
@@ -341,8 +392,8 @@ wss.on('connection', (ws) => {
       plugins: pluginStatus,
       imagePlaceholderTimeoutMs: config.imagePlaceholderTimeoutMs,
       generationTimeoutMs: config.queueTaskTimeoutMs,
-      recentChannelTokenBudget: config.recentChannelTokenBudget,
-      memoryTokenBudget: config.memoryTokenBudget,
+      dynamicContextTokenBudget: config.dynamicContextTokenBudget,
+      memorySoftTokenBudget: config.memorySoftTokenBudget,
       streamResponses: config.streamResponses === true,
       dialogueOnlyResponses: config.dialogueOnlyResponses === true,
     }),
@@ -378,6 +429,7 @@ wss.on('connection', (ws) => {
       setCrossRelayEnabled,
       rememberTurn,
       claimProviderMetrics,
+      resolveRawReplies,
       log,
     });
   });
@@ -397,6 +449,12 @@ wss.on('connection', (ws) => {
     }
     cancelledImageRequests.clear();
     timedOutImageRequests.clear();
+
+    for (const pending of pendingRawReplyRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('SillyTavern disconnected.'));
+    }
+    pendingRawReplyRequests.clear();
 
     const autocompleteDebouncers = getAutocompleteDebouncers();
     for (const [key, debouncer] of Object.entries(autocompleteDebouncers)) {
