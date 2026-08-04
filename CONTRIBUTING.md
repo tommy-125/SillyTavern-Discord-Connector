@@ -1,4 +1,4 @@
-# Contributing to SillyTavern Discord Connector
+# Contributing to KuroHelper AI Runtime
 
 First of all, thank you for taking the time to contribute! This is a solo-maintained project built in my spare time, and every bit of help - whether it's a bug report, a suggestion, or a pull request - is genuinely appreciated.
 
@@ -17,7 +17,7 @@ First of all, thank you for taking the time to contribute! This is a solo-mainta
 
 Before opening an issue, please:
 
-1. **Check if it's already reported** - search the [existing issues](https://github.com/senjinthedragon/SillyTavern-Discord-Connector/issues) first.
+1. **Check if it's already reported** - search the [existing issues](https://github.com/tommy-125/kurohelper-ai-runtime/issues) first.
 2. **Make sure you're on the latest version** - the bug may already be fixed.
 3. **Check the bridge server terminal and the SillyTavern browser console** - error messages there often explain exactly what went wrong.
 

@@ -3,12 +3,19 @@
   "version": "1.0.0",
   "private": true,
   "description": "Tokenless SillyTavern AI runtime for KuroHelper",
-  "author": "Senjin the Dragon <https://github.com/senjinthedragon>",
+  "author": "tommy-125 <https://github.com/tommy-125>",
+  "contributors": [
+    "Senjin the Dragon <https://github.com/senjinthedragon>"
+  ],
   "license": "MIT",
-  "homepage": "https://github.com/senjinthedragon/SillyTavern-Discord-Connector",
+  "homepage": "https://github.com/tommy-125/kurohelper-ai-runtime",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/senjinthedragon/SillyTavern-Discord-Connector.git"
+    "url": "git+https://github.com/tommy-125/kurohelper-ai-runtime.git",
+    "directory": "server"
+  },
+  "bugs": {
+    "url": "https://github.com/tommy-125/kurohelper-ai-runtime/issues"
   },
   "main": "server.js",
   "scripts": {

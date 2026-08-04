@@ -5,7 +5,7 @@
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "Senjin the Dragon <senjin@hatchling.org>",
+  "author": "tommy-125 (fork; original by Senjin the Dragon)",
   "version": "1.0.0",
-  "homePage": "https://github.com/senjinthedragon/SillyTavern-Discord-Connector"
+  "homePage": "https://github.com/tommy-125/kurohelper-ai-runtime"
 }

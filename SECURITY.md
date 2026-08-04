@@ -15,7 +15,7 @@ If you discover a security vulnerability in this project, please **do not open a
 
 Instead, please use GitHub's private vulnerability reporting:
 
-1. Go to the [Security tab](https://github.com/senjinthedragon/SillyTavern-Discord-Connector/security) of this repository
+1. Go to the [Security tab](https://github.com/tommy-125/kurohelper-ai-runtime/security) of this repository
 2. Click **Report a vulnerability**
 3. Fill in as much detail as you can - what the issue is, how to reproduce it, and what the potential impact might be
 

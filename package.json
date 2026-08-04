@@ -40,16 +40,19 @@
     "configure-runtime-secret": "node scripts/configure-runtime-secret.mjs",
     "release-checklist": "node scripts/release-checklist.js"
   },
-  "author": "Senjin the Dragon <https://github.com/senjinthedragon>",
-  "license": "MIT",
+  "author": "tommy-125 <https://github.com/tommy-125>",
+  "contributors": [
+    "Senjin the Dragon <https://github.com/senjinthedragon>"
+  ],
+  "license": "SEE LICENSE IN LICENSES.md",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/senjinthedragon/SillyTavern-Discord-Connector.git"
+    "url": "git+https://github.com/tommy-125/kurohelper-ai-runtime.git"
   },
   "bugs": {
-    "url": "https://github.com/senjinthedragon/SillyTavern-Discord-Connector/issues"
+    "url": "https://github.com/tommy-125/kurohelper-ai-runtime/issues"
   },
-  "homepage": "https://github.com/senjinthedragon/SillyTavern-Discord-Connector#readme",
+  "homepage": "https://github.com/tommy-125/kurohelper-ai-runtime#readme",
   "devDependencies": {
     "version-everything": "^0.11.4"
   }

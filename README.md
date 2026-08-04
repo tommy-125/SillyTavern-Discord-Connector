@@ -7,7 +7,7 @@ Requires Docker Desktop with Docker Compose and Node.js 22 or later. Keep
 the runtime-secret configuration script.
 
 ```powershell
-git clone https://github.com/kuro-helper/kurohelper-ai-runtime.git
+git clone https://github.com/tommy-125/kurohelper-ai-runtime.git
 git clone https://github.com/kuro-helper/kurohelper.git
 
 Set-Location ./kurohelper-ai-runtime
