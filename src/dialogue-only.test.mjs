@@ -49,10 +49,17 @@ test('does not remove unparenthesized narration', () => {
   );
 });
 
-test('does not remove asterisk stage directions', () => {
+test('removes ASCII and full-width asterisk stage directions', () => {
   assert.equal(
-    formatDialogueOnly('*耳朵輕輕抖了一下*\n……嗯。'),
-    '*耳朵輕輕抖了一下*\n……嗯。',
+    formatDialogueOnly('*耳朵輕輕抖了一下*\n……嗯。\n＊声音更轻了些＊\n……知道了。'),
+    '……嗯。\n\n……知道了。',
+  );
+});
+
+test('preserves ordinary asterisk emphasis', () => {
+  assert.equal(
+    formatDialogueOnly('這件事，*真的*很重要。'),
+    '這件事，*真的*很重要。',
   );
 });
 
