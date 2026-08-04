@@ -1,32 +1,39 @@
 "use strict";
 
 const RAW_RESPONSE_CACHE_LIMIT = 5;
-const runtimeRawResponses = [];
+const runtimeRawResponses = new Map();
 
 function normalizeRawResponse(entry) {
   if (!entry || typeof entry !== "object") return null;
   const rawText = String(entry.rawText || "");
   if (!rawText) return null;
+  const channelId = String(entry.channelId || "").trim();
+  const requestId = String(entry.requestId || "").trim();
   return {
     cachedAt: String(entry.cachedAt || new Date().toISOString()),
     rawText,
     source: String(entry.source || "generation").trim().toLowerCase() || "generation",
+    ...(channelId ? { channelId } : {}),
+    ...(requestId ? { requestId } : {}),
   };
 }
 
 function cacheRuntimeRawResponse(entry, limit = RAW_RESPONSE_CACHE_LIMIT) {
   const normalized = normalizeRawResponse(entry);
   if (!normalized) return false;
-  runtimeRawResponses.push(normalized);
-  runtimeRawResponses.splice(
+  const entries = runtimeRawResponses.get(normalized.channelId || "") || [];
+  entries.push(normalized);
+  entries.splice(
     0,
-    Math.max(0, runtimeRawResponses.length - Math.max(1, Number(limit) || 1)),
+    Math.max(0, entries.length - Math.max(1, Number(limit) || 1)),
   );
+  runtimeRawResponses.set(normalized.channelId || "", entries);
   return true;
 }
 
-function listRuntimeRawResponses() {
-  return runtimeRawResponses.map((entry) => ({ ...entry }));
+function listRuntimeRawResponses(channelId = "") {
+  return (runtimeRawResponses.get(String(channelId || "").trim()) || [])
+    .map((entry) => ({ ...entry }));
 }
 
 function mergeRawResponseEntries(entryGroups, limit = RAW_RESPONSE_CACHE_LIMIT) {
@@ -43,7 +50,7 @@ function mergeRawResponseEntries(entryGroups, limit = RAW_RESPONSE_CACHE_LIMIT) 
 }
 
 function resetRuntimeRawResponseCacheForTests() {
-  runtimeRawResponses.length = 0;
+  runtimeRawResponses.clear();
 }
 
 module.exports = {

@@ -480,7 +480,10 @@ export async function handleUserMessage(data, { abortController = new AbortContr
       if (msg.is_user) break;
 
       const original = String(msg.mes ?? '');
-      const cacheChanged = cacheRawReply(chat, msg, original);
+      const cacheChanged = cacheRawReply(chat, msg, original, {
+        channelId: messageState.chatId,
+        requestId: data.requestId,
+      });
       if (!sharedState.dialogueOnlyResponses) {
         changed ||= cacheChanged;
         continue;

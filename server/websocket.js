@@ -120,7 +120,8 @@ function sendToSillyTavern(payload) {
   return workerPool.sendToAny(payload);
 }
 
-function listRawReplies(requestId) {
+function listRawReplies(requestId, nativeChannelId) {
+  const channelId = resolveConversationId('kurohelper', nativeChannelId);
   const workerIds = workerPool.workerIds();
   if (workerIds.length === 0) {
     return Promise.reject(new Error('SillyTavern is not connected.'));
@@ -133,11 +134,11 @@ function listRawReplies(requestId) {
         resolve({
           entries: mergeRawResponseEntries([
             ...pending.entries,
-            listRuntimeRawResponses(),
+            listRuntimeRawResponses(channelId),
           ]),
         });
       } else {
-        const runtimeEntries = listRuntimeRawResponses();
+        const runtimeEntries = listRuntimeRawResponses(channelId);
         if (runtimeEntries.length > 0) {
           resolve({ entries: runtimeEntries });
         } else {
@@ -152,8 +153,9 @@ function listRawReplies(requestId) {
       timer,
       remaining: workerIds.length,
       entries: [],
+      channelId,
     });
-    workerPool.broadcast({ type: 'raw_replies_request', requestId });
+    workerPool.broadcast({ type: 'raw_replies_request', requestId, channelId });
   });
 }
 
@@ -168,7 +170,7 @@ function resolveRawReplies(requestId, entries) {
   pending.resolve({
     entries: mergeRawResponseEntries([
       ...pending.entries,
-      listRuntimeRawResponses(),
+      listRuntimeRawResponses(pending.channelId),
     ]),
   });
 }
@@ -306,7 +308,10 @@ const pluginLoader = createPluginLoader({
         ...(metadata.contextParticipants || []).map((user) => user?.id),
       ].filter(Boolean),
     });
-    const visionPromise = describeImages(metadata.images, text);
+    const visionPromise = describeImages(metadata.images, text, {
+      channelId: conversationId,
+      requestId: metadata.requestId,
+    });
     const [memory, vision] = await Promise.all([memoryPromise, visionPromise]);
     if (metadata.requestId && Array.isArray(vision.metricRecords)) {
       const frontend = getFrontend(platform);

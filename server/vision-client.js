@@ -455,7 +455,7 @@ function createVisionClient(options = {}) {
     };
   }
 
-  async function describe(images, userText = "") {
+  async function describe(images, userText = "", requestContext = {}) {
     const startedAt = Date.now();
     const selected = (Array.isArray(images) ? images : [])
       .filter((image) => isAllowedDiscordImageUrl(image?.url))
@@ -604,6 +604,8 @@ function createVisionClient(options = {}) {
                 cachedAt: new Date().toISOString(),
                 rawText: rawDescription,
                 source: "vision",
+                channelId: String(requestContext.channelId || "").trim(),
+                requestId: String(requestContext.requestId || "").trim(),
               });
             } catch {
               // Raw-response diagnostics must never break image analysis.

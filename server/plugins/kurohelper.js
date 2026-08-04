@@ -235,7 +235,12 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
         return;
       }
       try {
-        const result = await handlers.listRawReplies(message.requestId);
+        const channelId = String(message.payload?.channelId || "").trim();
+        if (!channelId) {
+          fail(socket, message.requestId, "invalid_request", "channelId is required.");
+          return;
+        }
+        const result = await handlers.listRawReplies(message.requestId, channelId);
         send(socket, "raw_replies_response", message.requestId, result);
       } catch (error) {
         fail(socket, message.requestId, "raw_replies_unavailable", error.message);

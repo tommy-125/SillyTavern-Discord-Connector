@@ -44,3 +44,10 @@ test("Vision and main-model raw replies share one chronological five-entry view"
     { cachedAt: "2026-08-04T00:00:03.000Z", rawText: "vision-2", source: "vision" },
   ]);
 });
+
+test("runtime raw-response cache isolates Discord channels", () => {
+  cacheRuntimeRawResponse({ rawText: "channel-a", channelId: "kurohelper:a" });
+  cacheRuntimeRawResponse({ rawText: "channel-b", channelId: "kurohelper:b" });
+  assert.deepEqual(listRuntimeRawResponses("kurohelper:a").map((entry) => entry.rawText), ["channel-a"]);
+  assert.deepEqual(listRuntimeRawResponses("kurohelper:b").map((entry) => entry.rawText), ["channel-b"]);
+});

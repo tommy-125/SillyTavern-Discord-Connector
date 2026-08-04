@@ -237,7 +237,7 @@ test("KuroHelper transport returns the raw reply cache", async () => {
       version: 1,
       type: "raw_replies_request",
       requestId: "raw-1",
-      payload: {},
+      payload: { channelId: "123456789012345678" },
     }));
     const response = await responsePromise;
     assert.equal(response.type, "raw_replies_response");

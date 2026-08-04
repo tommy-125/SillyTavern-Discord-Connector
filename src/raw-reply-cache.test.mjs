@@ -62,3 +62,14 @@ test('raw replies survive clearing the SillyTavern scratch chat', () => {
   chat.length = 0;
   assert.equal(listRawReplyCache(chat)[0].rawText, 'raw');
 });
+
+test('raw replies are isolated by Discord channel', () => {
+  const chat = [];
+  const first = { is_user: false, mes: 'first', extra: {} };
+  const second = { is_user: false, mes: 'second', extra: {} };
+  chat.push(first, second);
+  cacheRawReply(chat, first, 'channel-a', { channelId: 'kurohelper:a', requestId: 'a-1' });
+  cacheRawReply(chat, second, 'channel-b', { channelId: 'kurohelper:b', requestId: 'b-1' });
+  assert.deepEqual(listRawReplyCache(chat, 'kurohelper:a').map((entry) => entry.rawText), ['channel-a']);
+  assert.deepEqual(listRawReplyCache(chat, 'kurohelper:b').map((entry) => entry.rawText), ['channel-b']);
+});

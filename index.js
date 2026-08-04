@@ -302,7 +302,7 @@ function connect() {
         safeSend({
           type: "raw_replies_response",
           requestId: data.requestId,
-          entries: listRawReplyCache(SillyTavern.getContext().chat),
+          entries: listRawReplyCache(SillyTavern.getContext().chat, data.channelId),
         });
         return;
       }

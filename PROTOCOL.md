@@ -22,7 +22,7 @@ Authorization: Bearer <KUROHELPER_BRIDGE_SECRET>
 - `generate_request` → `generate_response`
 - `health_request` → `health_response`
 - `memory_request` → `memory_response`
-- `raw_replies_request` → `raw_replies_response`
+- `raw_replies_request` (`payload.channelId`) → `raw_replies_response`（指定頻道最近五則主模型／Vision 原始輸出）
 - AI Runtime → Go Bot 背景統計：`metric_event`（目前用於 `memory_extraction`）
 - 任一失敗 → `error_response`
 - 生成中可收到不終結請求的 `typing` 或 `images` 事件
