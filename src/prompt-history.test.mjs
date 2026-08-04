@@ -52,9 +52,10 @@ test('injects Discord history as user and assistant turns then restores chat', (
 
   assert.equal(chat.length, 3);
   assert.equal(chat[0].is_user, true);
-  assert.equal(chat[0].mes, '[肉圓] 小黑在不在');
+  assert.equal(chat[0].mes, '[近期脈絡]\n[肉圓] 小黑在不在');
   assert.equal(chat[1].is_user, false);
   assert.equal(chat[1].mes, '……嗯。我在。');
+  assert.match(chat[2].mes, /^\[本次訊息\]/);
   assert.match(chat[2].mes, /圖片摘要：一隻黑貓/);
 
   restore();

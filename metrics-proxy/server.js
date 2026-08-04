@@ -23,6 +23,17 @@ const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 const records = [];
 
+function generationLog(event, trace, fields = {}) {
+  if (!trace?.trackGeneration) return;
+  const values = {
+    event,
+    traceId: trace.traceId,
+    workerId: trace.workerId || "unattributed",
+    ...fields,
+  };
+  console.log(`[metrics-proxy] generation ${JSON.stringify(values)}`);
+}
+
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(value || "", 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -127,8 +138,16 @@ function parseSseEvents(state, chunk, onPayload) {
   }
 }
 
-function buildUpstreamUrl(requestUrl) {
+function requestRoute(requestUrl) {
   const url = new URL(requestUrl, "http://metrics-proxy.invalid");
+  const match = url.pathname.match(/^\/worker\/([^/]+)(\/.*)?$/);
+  const workerId = match ? decodeURIComponent(match[1]) : "";
+  if (match) url.pathname = match[2] || "/";
+  return { url, workerId };
+}
+
+function buildUpstreamUrl(requestUrl) {
+  const { url } = requestRoute(requestUrl);
   const suffix = url.pathname.replace(/^\/v1(?=\/|$)/, "");
   return `${UPSTREAM_BASE_URL}${suffix}${url.search}`;
 }
@@ -220,11 +239,14 @@ function writeJson(response, status, value) {
   response.end(body);
 }
 
-function claimRecords(since) {
-  pruneRecords();
+function claimRecords(since, workerId = "", sourceRecords = records) {
+  if (sourceRecords === records) pruneRecords();
   const threshold = Number.isFinite(since) ? since : 0;
-  const claimed = records.filter(
-    (record) => !record.claimed && record.startedAt >= threshold,
+  const claimed = sourceRecords.filter(
+    (record) =>
+      !record.claimed &&
+      record.startedAt >= threshold &&
+      (!workerId || record.workerId === workerId),
   );
   for (const record of claimed) record.claimed = true;
   return claimed.map(({ claimed: _claimed, ...record }) => record);
@@ -232,6 +254,7 @@ function claimRecords(since) {
 
 async function proxyRequest(request, response) {
   const startedAt = Date.now();
+  const { workerId } = requestRoute(request.url);
   const isGeneration =
     request.method === "POST" &&
     new URL(request.url, "http://metrics-proxy.invalid").pathname.endsWith(
@@ -242,6 +265,21 @@ async function proxyRequest(request, response) {
     request.url,
     request.headers,
   );
+  const trace = {
+    traceId: randomUUID(),
+    workerId,
+    startedAt,
+    trackGeneration,
+    model: "",
+  };
+  request.kuroMetricsTrace = trace;
+  response.once("close", () => {
+    if (!response.writableFinished) {
+      generationLog("downstream_closed", trace, {
+        elapsedMs: Date.now() - startedAt,
+      });
+    }
+  });
   let body = ["GET", "HEAD"].includes(request.method) ? undefined : await readBody(request);
   let requestedModel = "";
   let streamed = false;
@@ -250,6 +288,7 @@ async function proxyRequest(request, response) {
     try {
       const parsed = JSON.parse(body.toString("utf8"));
       requestedModel = String(parsed.model || "");
+      trace.model = requestedModel;
       streamed = parsed.stream === true;
       applyGenerationOverrides(parsed);
       body = Buffer.from(JSON.stringify(parsed));
@@ -257,6 +296,8 @@ async function proxyRequest(request, response) {
       // Forward malformed JSON unchanged so the upstream returns its normal error.
     }
   }
+
+  generationLog("started", trace, { model: requestedModel });
 
   const headers = requestHeaders(request);
   if (isGeneration) headers.set("x-openrouter-metadata", "enabled");
@@ -266,6 +307,11 @@ async function proxyRequest(request, response) {
     body,
   });
   const headersAt = Date.now();
+  generationLog("upstream_headers", trace, {
+    model: requestedModel,
+    statusCode: upstream.statusCode,
+    headersMs: headersAt - startedAt,
+  });
   response.writeHead(upstream.statusCode, responseHeaders(upstream));
 
   let firstTokenAt = null;
@@ -321,6 +367,8 @@ async function proxyRequest(request, response) {
   const completedAt = Date.now();
   records.push({
     generationId,
+    traceId: trace.traceId,
+    workerId,
     startedAt,
     completedAt,
     headersMs: headersAt - startedAt,
@@ -339,6 +387,15 @@ async function proxyRequest(request, response) {
     ...(usage || {}),
     claimed: false,
   });
+  generationLog("completed", trace, {
+    generationId,
+    model: responseModel || requestedModel,
+    statusCode: upstream.statusCode,
+    headersMs: headersAt - startedAt,
+    durationMs: completedAt - startedAt,
+    firstTokenMs: firstTokenAt == null ? null : firstTokenAt - startedAt,
+    usageAvailable: usage != null,
+  });
   pruneRecords(completedAt);
 }
 
@@ -350,7 +407,10 @@ async function handler(request, response) {
   }
   if (request.method === "GET" && url.pathname === "/internal/metrics/claim") {
     writeJson(response, 200, {
-      records: claimRecords(Number(url.searchParams.get("since"))),
+      records: claimRecords(
+        Number(url.searchParams.get("since")),
+        String(url.searchParams.get("workerId") || ""),
+      ),
     });
     return;
   }
@@ -362,6 +422,12 @@ async function handler(request, response) {
     } else {
       response.destroy();
     }
+    const trace = request.kuroMetricsTrace;
+    generationLog("failed", trace, {
+      model: trace?.model || "",
+      elapsedMs: trace?.startedAt ? Date.now() - trace.startedAt : null,
+      error: String(error?.message || error).slice(0, 300),
+    });
     console.error(`[metrics-proxy] ${error.message}`);
   }
 }
@@ -379,6 +445,7 @@ module.exports = {
   buildUpstreamUrl,
   claimRecords,
   parseSseEvents,
+  requestRoute,
   routingFromPayload,
   shouldTrackGeneration,
   requestUpstream,

@@ -18,6 +18,7 @@ const { rememberTurn, recallMemories } = require('./memory-client');
 const { claimProviderMetrics } = require('./metrics-client');
 const {
   describeImages,
+  getVisionCacheStats,
   VISION_FAILURE_REPLY,
   visionRequestFailed,
 } = require('./vision-client');
@@ -25,7 +26,6 @@ const { createPluginLoader } = require('./plugin-loader');
 const {
   fanout,
   addRoute,
-  clearRoutes,
   resolveConversationId,
   getRoutes,
   getFrontend,
@@ -33,6 +33,11 @@ const {
   getRegisteredPlatforms,
 } = require('./frontend-manager');
 const { handleBridgePacket } = require('./websocket-router');
+const { createWorkerPool } = require('./worker-pool');
+const {
+  listRuntimeRawResponses,
+  mergeRawResponseEntries,
+} = require('./raw-response-cache');
 const { loadLocale, makeTranslator } = require('./i18n');
 const {
   load: loadPersonaMap,
@@ -78,7 +83,11 @@ loadPersonaMap();
 loadLangMap();
 loadLocale(config.userLocale || null);
 
-let sillyTavernClient = null;
+const workerPool = createWorkerPool({
+  isOpen: (socket) => socket?.readyState === WebSocket.OPEN,
+  log,
+});
+let legacyWorkerSequence = 0;
 const pendingAutocompletes = {};
 const autocompleteDebouncers = {};
 const pendingImageMessages = {};
@@ -89,7 +98,7 @@ const streamReceived = new Set();
 const pendingRawReplyRequests = new Map();
 
 function getSillyTavernClient() {
-  return sillyTavernClient;
+  return workerPool.firstSocket();
 }
 
 function getPendingAutocompletes() {
@@ -108,32 +117,60 @@ function setBridgeActivity(expression, ownerName) {
 }
 
 function sendToSillyTavern(payload) {
-  if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN)
-    return;
-  sillyTavernClient.send(JSON.stringify(payload));
+  return workerPool.sendToAny(payload);
 }
 
 function listRawReplies(requestId) {
-  if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN) {
+  const workerIds = workerPool.workerIds();
+  if (workerIds.length === 0) {
     return Promise.reject(new Error('SillyTavern is not connected.'));
   }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
+      const pending = pendingRawReplyRequests.get(requestId);
       pendingRawReplyRequests.delete(requestId);
-      reject(new Error('Timed out while reading raw replies.'));
+      if (pending?.entries.length) {
+        resolve({
+          entries: mergeRawResponseEntries([
+            ...pending.entries,
+            listRuntimeRawResponses(),
+          ]),
+        });
+      } else {
+        const runtimeEntries = listRuntimeRawResponses();
+        if (runtimeEntries.length > 0) {
+          resolve({ entries: runtimeEntries });
+        } else {
+          reject(new Error('Timed out while reading raw replies.'));
+        }
+      }
     }, 5000);
     timer.unref?.();
-    pendingRawReplyRequests.set(requestId, { resolve, reject, timer });
-    sendToSillyTavern({ type: 'raw_replies_request', requestId });
+    pendingRawReplyRequests.set(requestId, {
+      resolve,
+      reject,
+      timer,
+      remaining: workerIds.length,
+      entries: [],
+    });
+    workerPool.broadcast({ type: 'raw_replies_request', requestId });
   });
 }
 
 function resolveRawReplies(requestId, entries) {
   const pending = pendingRawReplyRequests.get(requestId);
   if (!pending) return;
+  if (Array.isArray(entries)) pending.entries.push(entries);
+  pending.remaining -= 1;
+  if (pending.remaining > 0) return;
   pendingRawReplyRequests.delete(requestId);
   clearTimeout(pending.timer);
-  pending.resolve({ entries: Array.isArray(entries) ? entries.slice(-5) : [] });
+  pending.resolve({
+    entries: mergeRawResponseEntries([
+      ...pending.entries,
+      listRuntimeRawResponses(),
+    ]),
+  });
 }
 
 function dispatchCommand(platform, chatId, command, args, userId) {
@@ -141,7 +178,7 @@ function dispatchCommand(platform, chatId, command, args, userId) {
   addRoute(conversationId, platform, chatId);
   const userLocale = getLangForUser(platform, userId) || null;
 
-  if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN) {
+  if (!workerPool.hasWorkers()) {
     handleOfflineCommand(
       platform,
       chatId,
@@ -252,7 +289,7 @@ const pluginLoader = createPluginLoader({
       ).personaName;
     }
     const userLocale = getLangForUser(platform, userId) || null;
-    if (!sillyTavernClient || sillyTavernClient.readyState !== WebSocket.OPEN) {
+    if (!workerPool.hasWorkers()) {
       return false;
     }
     const memoryPromise = recallMemories({
@@ -271,6 +308,22 @@ const pluginLoader = createPluginLoader({
     });
     const visionPromise = describeImages(metadata.images, text);
     const [memory, vision] = await Promise.all([memoryPromise, visionPromise]);
+    if (metadata.requestId && Array.isArray(vision.metricRecords)) {
+      const frontend = getFrontend(platform);
+      if (typeof frontend?.sendMetric === 'function') {
+        try {
+          await Promise.all(vision.metricRecords.map((metrics, index) =>
+            frontend.sendMetric(chatId, {
+              requestId: `${metadata.requestId}:vision:${index}`,
+              sourceRequestId: metadata.requestId,
+              operation: 'vision',
+              metrics,
+            })));
+        } catch (error) {
+          log('warn', `[Vision] Could not report usage metrics: ${error.message}`);
+        }
+      }
+    }
     if (visionRequestFailed(metadata.images, vision)) {
       log(
         'warn',
@@ -292,7 +345,7 @@ const pluginLoader = createPluginLoader({
       return true;
     }
     const recentChannelContext = metadata.recentChannelContext || '';
-    sendToSillyTavern({
+    const generationPacket = {
       type: 'user_message',
       text,
       chatId: conversationId,
@@ -316,7 +369,32 @@ const pluginLoader = createPluginLoader({
       visionModel: vision.model || '',
       ...(mappedPersona ? { mappedPersona } : {}),
       ...(userLocale ? { userLocale } : {}),
+    };
+    const accepted = workerPool.enqueue({
+      channelId: conversationId,
+      requestId: metadata.requestId || '',
+      payload: generationPacket,
+      onDrop: (error) => {
+        log(
+          'warn',
+          `[Workers] Request ${(metadata.requestId || 'unknown').slice(-8)} failed: ${error.message}`,
+        );
+        fanout(
+          conversationId,
+          'sendText',
+          '生成工作頁中斷，請再試一次。',
+          {
+            kind: 'error',
+            requestId: metadata.requestId || '',
+            final: true,
+            metrics: { status: 'worker_disconnected' },
+          },
+        ).catch((fanoutError) =>
+          log('warn', `[Workers] Could not report dropped request: ${fanoutError.message}`),
+        );
+      },
     });
+    if (!accepted) return false;
 
     // Cross-relay the user's message to all other platforms in the same
     // conversation so every connected client stays in sync.
@@ -341,10 +419,9 @@ const pluginLoader = createPluginLoader({
     dispatchCommand(platform, chatId, command, args, userId);
   },
   isSillyTavernReady: () =>
-    Boolean(
-      sillyTavernClient && sillyTavernClient.readyState === WebSocket.OPEN,
-    ),
+    workerPool.hasWorkers(),
   listRawReplies,
+  getVisionCacheStats,
   log,
 });
 
@@ -358,16 +435,23 @@ const wss = new WebSocket.Server({
 });
 log('log', `[Bridge] WebSocket server listening on port ${wssPort}`);
 
-wss.on('connection', (ws) => {
-  if (sillyTavernClient && sillyTavernClient.readyState === WebSocket.OPEN) {
-    log(
-      'warn',
-      '[Bridge] New SillyTavern connection received while one is already active - closing previous.',
-    );
-    sillyTavernClient.close(1008, 'Replaced by new connection');
-  }
-  sillyTavernClient = ws;
-  log('log', '[Bridge] SillyTavern connected');
+function workerIdFromRequest(request) {
+  try {
+    const value = new URL(request?.url || '/', 'ws://localhost').searchParams
+      .get('workerId');
+    const normalized = String(value || '')
+      .trim()
+      .replace(/[^a-zA-Z0-9_.-]/g, '-')
+      .slice(0, 64);
+    if (normalized) return normalized;
+  } catch {}
+  legacyWorkerSequence += 1;
+  return `legacy-${legacyWorkerSequence}`;
+}
+
+wss.on('connection', (ws, request) => {
+  const workerId = workerIdFromRequest(request);
+  let messageTail = Promise.resolve();
 
   // Build plugin status map for all known platforms. Only platforms that
   // successfully registered via registerFrontend() are marked "active".
@@ -385,6 +469,8 @@ wss.on('connection', (ws) => {
   ws.send(
     JSON.stringify({
       type: 'bridge_config',
+      workerId,
+      workerPool: workerPool.snapshot(),
       timezone: config.timezone || null,
       locale: config.locale || null,
       userLocale: config.userLocale || null,
@@ -398,15 +484,16 @@ wss.on('connection', (ws) => {
       dialogueOnlyResponses: config.dialogueOnlyResponses === true,
     }),
   );
+  workerPool.register(workerId, ws);
 
-  ws.on('message', async (message) => {
+  async function processWorkerMessage(message) {
     let data;
     try {
       data = JSON.parse(
         typeof message === 'string' ? message : message.toString('utf8'),
       );
     } catch (err) {
-      log('warn', `[Bridge] Dropping invalid JSON packet: ${err.message}`);
+      log('warn', `[Bridge] Dropping invalid JSON packet from ${workerId}: ${err.message}`);
       return;
     }
 
@@ -428,48 +515,68 @@ wss.on('connection', (ws) => {
       setCurrentPersonaName: setDefaultPersonaName,
       setCrossRelayEnabled,
       rememberTurn,
-      claimProviderMetrics,
+      claimProviderMetrics: (since) => claimProviderMetrics(since, workerId),
       resolveRawReplies,
       log,
     });
+
+    if (data.type === 'generation_complete') {
+      if (!workerPool.complete(workerId, data.requestId)) {
+        log(
+          'warn',
+          `[Workers] Ignored unmatched completion ${(data.requestId || 'unknown').slice(-8)} from ${workerId}.`,
+        );
+      }
+    }
+    if (data.type === 'worker_draining') {
+      workerPool.abandon(workerId, data.requestId);
+    }
+  }
+
+  ws.on('message', (message) => {
+    messageTail = messageTail
+      .then(() => processWorkerMessage(message))
+      .catch((error) =>
+        log('warn', `[Bridge] Packet from ${workerId} failed: ${error.message}`),
+      );
   });
 
   ws.on('close', () => {
-    sillyTavernClient = null;
-    setDefaultPersonaName(null);
-    setCrossRelayEnabled(true);
-    clearRoutes();
-    setBridgeActivity(null);
+    messageTail.finally(() => {
+      workerPool.unregister(workerId, ws);
+      if (workerPool.hasWorkers()) return;
 
-    streamHandled.clear();
-    streamReceived.clear();
+      setBridgeActivity(null);
+      streamHandled.clear();
+      streamReceived.clear();
 
-    for (const key of Object.keys(pendingImageMessages)) {
-      delete pendingImageMessages[key];
-    }
-    cancelledImageRequests.clear();
-    timedOutImageRequests.clear();
+      for (const key of Object.keys(pendingImageMessages)) {
+        delete pendingImageMessages[key];
+      }
+      cancelledImageRequests.clear();
+      timedOutImageRequests.clear();
 
-    for (const pending of pendingRawReplyRequests.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('SillyTavern disconnected.'));
-    }
-    pendingRawReplyRequests.clear();
+      for (const pending of pendingRawReplyRequests.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('SillyTavern disconnected.'));
+      }
+      pendingRawReplyRequests.clear();
 
-    const autocompleteDebouncers = getAutocompleteDebouncers();
-    for (const [key, debouncer] of Object.entries(autocompleteDebouncers)) {
-      clearTimeout(debouncer.timer);
-      delete autocompleteDebouncers[key];
-      debouncer.interaction.respond([]).catch(() => {});
-    }
+      const autocompleteDebouncers = getAutocompleteDebouncers();
+      for (const [key, debouncer] of Object.entries(autocompleteDebouncers)) {
+        clearTimeout(debouncer.timer);
+        delete autocompleteDebouncers[key];
+        debouncer.interaction.respond([]).catch(() => {});
+      }
 
-    const pendingAutocompletes = getPendingAutocompletes();
-    for (const [requestId, pending] of Object.entries(pendingAutocompletes)) {
-      clearTimeout(pending.timeout);
-      delete pendingAutocompletes[requestId];
-      pending.interaction.respond([]).catch(() => {});
-    }
+      const pendingAutocompletes = getPendingAutocompletes();
+      for (const [requestId, pending] of Object.entries(pendingAutocompletes)) {
+        clearTimeout(pending.timeout);
+        delete pendingAutocompletes[requestId];
+        pending.interaction.respond([]).catch(() => {});
+      }
+    });
   });
 });
 
-module.exports = { getSillyTavernClient, dispatchCommand };
+module.exports = { getSillyTavernClient, dispatchCommand, workerPool };

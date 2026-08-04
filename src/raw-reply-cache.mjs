@@ -2,6 +2,8 @@ const RAW_REPLY_TEXT_KEY = 'kurohelperRawReply';
 const RAW_REPLY_CACHED_AT_KEY = 'kurohelperRawReplyCachedAt';
 
 export const RAW_REPLY_CACHE_LIMIT = 5;
+const recentRawReplies = [];
+const cachedMessages = new WeakSet();
 
 function hasCachedRawReply(message) {
   return Boolean(
@@ -39,9 +41,15 @@ export function cacheRawReply(
     message.extra[RAW_REPLY_CACHED_AT_KEY] = cachedAt;
   }
 
-  const cachedMessages = chat.filter(hasCachedRawReply);
-  const excess = Math.max(0, cachedMessages.length - Math.max(1, limit));
-  for (const staleMessage of cachedMessages.slice(0, excess)) {
+  if (!cachedMessages.has(message)) {
+    cachedMessages.add(message);
+    recentRawReplies.push({ cachedAt, rawText: text, source: 'generation' });
+    recentRawReplies.splice(0, Math.max(0, recentRawReplies.length - Math.max(1, limit)));
+  }
+
+  const legacyCachedMessages = chat.filter(hasCachedRawReply);
+  const excess = Math.max(0, legacyCachedMessages.length - Math.max(1, limit));
+  for (const staleMessage of legacyCachedMessages.slice(0, excess)) {
     delete staleMessage.extra[RAW_REPLY_TEXT_KEY];
     delete staleMessage.extra[RAW_REPLY_CACHED_AT_KEY];
   }
@@ -50,9 +58,15 @@ export function cacheRawReply(
 }
 
 export function listRawReplyCache(chat) {
+  if (recentRawReplies.length > 0) return recentRawReplies.map((entry) => ({ ...entry }));
   if (!Array.isArray(chat)) return [];
   return chat.filter(hasCachedRawReply).map((message) => ({
     cachedAt: message.extra[RAW_REPLY_CACHED_AT_KEY] || null,
     rawText: message.extra[RAW_REPLY_TEXT_KEY],
+    source: 'generation',
   }));
+}
+
+export function resetRawReplyCacheForTests() {
+  recentRawReplies.length = 0;
 }

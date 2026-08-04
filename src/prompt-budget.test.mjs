@@ -21,10 +21,8 @@ test('structured history keeps roles and binds observations to source messages',
     visionObservations: [{
       source: { message_id: '101', author_name: '肉圓', context_only: true },
       analysis: {
-        summary: '一張錯誤畫面',
         ocr: ['502 Bad Gateway'],
-        details: [],
-        uncertain: [],
+        observation: '與問題相關的錯誤文字是 502 Bad Gateway',
       },
     }],
     dynamicContextTokenBudget: 300,
@@ -34,6 +32,7 @@ test('structured history keeps roles and binds observations to source messages',
   assert.equal(result.recentMessages.length, 2);
   assert.equal(result.recentMessages[0].assistant, false);
   assert.match(result.recentMessages[0].content, /502 Bad Gateway/);
+  assert.match(result.recentMessages[0].content, /客觀 OCR/);
   assert.equal(result.recentMessages[1].assistant, true);
   assert.ok(result.tokenUsage.total <= 300);
 });
@@ -44,10 +43,7 @@ test('structured history appends current image context to current user turn', ()
     visionObservations: [{
       source: { message_id: '200', author_name: '肉圓', context_only: false },
       analysis: {
-        summary: '一隻黑貓',
-        ocr: [],
-        details: ['坐在窗邊'],
-        uncertain: [],
+        observation: '使用者問到的動物是一隻坐在窗邊的黑貓',
       },
     }],
     dynamicContextTokenBudget: 220,
@@ -55,8 +51,34 @@ test('structured history appends current image context to current user turn', ()
   });
 
   assert.match(result.currentImageContext, /本次 Discord 訊息/);
-  assert.match(result.currentImageContext, /一隻黑貓/);
+  assert.match(result.currentImageContext, /黑貓/);
   assert.ok(result.tokenUsage.total <= 220);
+});
+
+test('structured history labels replied image observations and preserves replied text', () => {
+  const result = buildBudgetedDynamicHistory({
+    recentMessages: [],
+    visionObservations: [{
+      source: {
+        message_id: '199',
+        author_name: 'Alice',
+        source_kind: 'reply',
+        source_message_text: '請看這張 502 錯誤截圖',
+        context_only: false,
+      },
+      analysis: {
+        ocr: ['502 Bad Gateway'],
+        observation: '畫面顯示反向代理回傳 502 錯誤。',
+      },
+    }],
+    dynamicContextTokenBudget: 260,
+    memorySoftTokenBudget: 60,
+  });
+
+  assert.match(result.currentImageContext, /本次訊息所回覆的 Discord 圖片附件觀察/);
+  assert.match(result.currentImageContext, /被回覆訊息：請看這張 502 錯誤截圖/);
+  assert.match(result.currentImageContext, /502 Bad Gateway/);
+  assert.ok(result.tokenUsage.total <= 260);
 });
 
 test('text truncation can keep the newest tail', () => {
@@ -86,10 +108,8 @@ test('image observations stay attached to their Discord message', () => {
         context_only: true,
       },
       analysis: {
-        summary: '一張錯誤畫面',
-        ocr: ['502 Bad Gateway'],
-        details: [],
-        uncertain: [],
+        ocr: ['ERROR 502'],
+        observation: '與問題相關的錯誤文字是 502 Bad Gateway',
       },
     }],
     dynamicContextTokenBudget: 300,
@@ -98,7 +118,7 @@ test('image observations stay attached to their Discord message', () => {
 
   assert.match(
     result.conversationContext,
-    /\[Alice\].*Discord 訊息 ID=102\]\n  圖片摘要：一張錯誤畫面\n  圖片文字：502 Bad Gateway/,
+    /\[Alice\].*Discord 訊息 ID=102\]\n  問題相關圖片觀察：與問題相關的錯誤文字是 502 Bad Gateway\n  客觀 OCR：ERROR 502/,
   );
   assert.equal(result.visionContext, '');
   assert.ok(result.tokenUsage.total <= 300);
@@ -113,10 +133,7 @@ test('current-message image observation is retained as a message attachment', ()
         context_only: false,
       },
       analysis: {
-        summary: '一隻黑貓',
-        ocr: [],
-        details: ['坐在窗邊'],
-        uncertain: [],
+        observation: '使用者問到的動物是一隻坐在窗邊的黑貓',
       },
     }],
     dynamicContextTokenBudget: 220,
@@ -124,7 +141,7 @@ test('current-message image observation is retained as a message attachment', ()
   });
 
   assert.match(result.conversationContext, /本次訊息附件｜說話者：肉圓/);
-  assert.match(result.conversationContext, /圖片摘要：一隻黑貓/);
+  assert.match(result.conversationContext, /問題相關圖片觀察：.*黑貓/);
   assert.ok(result.tokenUsage.total <= 220);
 });
 

@@ -5,6 +5,8 @@ const assert = require("node:assert/strict");
 const {
   applyGenerationOverrides,
   buildUpstreamUrl,
+  claimRecords,
+  requestRoute,
   parseSseEvents,
   routingFromPayload,
   shouldTrackGeneration,
@@ -61,6 +63,30 @@ test("buildUpstreamUrl preserves the OpenAI-compatible path and query", () => {
     buildUpstreamUrl("/v1/models?input_modalities=text"),
     "https://openrouter.ai/api/v1/models?input_modalities=text",
   );
+});
+
+test("worker route is stripped before forwarding and retains attribution", () => {
+  assert.deepEqual(requestRoute("/worker/worker-2/v1/models?x=1"), {
+    url: new URL("http://metrics-proxy.invalid/v1/models?x=1"),
+    workerId: "worker-2",
+  });
+  assert.equal(
+    buildUpstreamUrl("/worker/worker-2/v1/chat/completions"),
+    "https://openrouter.ai/api/v1/chat/completions",
+  );
+});
+
+test("metrics claims only records belonging to the requesting worker", () => {
+  const records = [
+    { generationId: "a", workerId: "worker-1", startedAt: 100, claimed: false },
+    { generationId: "b", workerId: "worker-2", startedAt: 100, claimed: false },
+  ];
+  assert.deepEqual(
+    claimRecords(0, "worker-2", records).map((record) => record.generationId),
+    ["b"],
+  );
+  assert.equal(records[0].claimed, false);
+  assert.equal(records[1].claimed, true);
 });
 
 test("parseSseEvents handles a usage-only final event", () => {

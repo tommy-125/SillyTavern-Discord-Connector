@@ -23,6 +23,7 @@
  * same mutable values (chatId, timezone, locale, plugins).
  */
 export const sharedState = {
+  workerId: null,
   lastActiveChatId: null,
   lastActiveUserLocale: null,
   bridgeTimezone: null,

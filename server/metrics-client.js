@@ -48,7 +48,7 @@ function aggregateProviderMetrics(records) {
   };
 }
 
-async function claimProviderMetrics(sinceMs) {
+async function claimProviderMetrics(sinceMs, workerId = "") {
   if (!METRICS_PROXY_URL) return aggregateProviderMetrics([]);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CLAIM_TIMEOUT_MS);
@@ -56,7 +56,7 @@ async function claimProviderMetrics(sinceMs) {
   try {
     const since = Math.max(0, Number(sinceMs) || 0);
     const response = await fetch(
-      `${METRICS_PROXY_URL}/internal/metrics/claim?since=${encodeURIComponent(since)}`,
+      `${METRICS_PROXY_URL}/internal/metrics/claim?since=${encodeURIComponent(since)}&workerId=${encodeURIComponent(workerId)}`,
       { signal: controller.signal },
     );
     if (!response.ok) throw new Error(`metrics proxy returned HTTP ${response.status}`);

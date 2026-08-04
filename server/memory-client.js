@@ -30,6 +30,11 @@ function createMemoryClient(options = {}) {
   );
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const log = options.log || (() => {});
+  const channelWriteTails = new Map();
+
+  function channelKey(channelId) {
+    return String(channelId || "__global__");
+  }
 
   async function post(path, body, timeout) {
     const controller = new AbortController();
@@ -84,14 +89,17 @@ function createMemoryClient(options = {}) {
     }
   }
 
-  async function rememberTurn(turn) {
+  function rememberTurn(turn) {
     if (!enabled || !turn?.userId || !turn?.userText || !turn?.assistantText) {
-      return false;
+      return Promise.resolve(false);
     }
-    try {
-      const result = await post(
-        "/v1/turns",
-        {
+    const key = channelKey(turn.channelId);
+    const previous = channelWriteTails.get(key) || Promise.resolve();
+    const current = previous.then(async () => {
+      try {
+        return await post(
+          "/v1/turns",
+          {
           request_id: String(turn.requestId || ""),
           character_id: characterId,
           user_id: String(turn.userId),
@@ -113,13 +121,18 @@ function createMemoryClient(options = {}) {
           user_text: String(turn.userText),
           assistant_text: String(turn.assistantText),
         },
-        65_000,
-      );
-      return result;
-    } catch (error) {
-      log("warn", `[Memory] Background write skipped: ${error.message}`);
-      return false;
-    }
+          65_000,
+        );
+      } catch (error) {
+        log("warn", `[Memory] Background write skipped: ${error.message}`);
+        return false;
+      }
+    });
+    channelWriteTails.set(key, current);
+    current.finally(() => {
+      if (channelWriteTails.get(key) === current) channelWriteTails.delete(key);
+    });
+    return current;
   }
 
   async function manage(

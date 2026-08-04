@@ -133,3 +133,53 @@ test("memory management uses the shared character scope", async () => {
   assert.equal(requests[5].body.offset, 10);
   assert.equal(requests[7].body.backup_id, "20260730T120000Z-manual-abcdef12");
 });
+
+function turn(channelId, requestId) {
+  return { requestId, userId: "u1", channelId, userText: `user-${requestId}`, assistantText: `assistant-${requestId}` };
+}
+
+test("same-channel memory writes are FIFO while different channels overlap", async () => {
+  const started = [];
+  const releases = [];
+  const client = createMemoryClient({
+    enabled: true,
+    fetchImpl: async (_url, options) => {
+      started.push(JSON.parse(options.body).request_id);
+      await new Promise((resolve) => releases.push(resolve));
+      return { ok: true, json: async () => ({ status: "completed" }) };
+    },
+  });
+  const first = client.rememberTurn(turn("c1", "1"));
+  const second = client.rememberTurn(turn("c1", "2"));
+  const other = client.rememberTurn(turn("c2", "3"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["1", "3"]);
+  releases.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["1", "3", "2"]);
+  releases.splice(0).forEach((release) => release());
+  await Promise.all([first, second, other]);
+});
+
+test("recall does not wait for a pending same-channel write", async () => {
+  let releaseWrite;
+  const calls = [];
+  const client = createMemoryClient({
+    enabled: true,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (url.endsWith("/v1/turns")) {
+        await new Promise((resolve) => { releaseWrite = resolve; });
+        return { ok: true, json: async () => ({ status: "completed" }) };
+      }
+      return { ok: true, json: async () => ({ context: "fresh", memories: [] }) };
+    },
+  });
+  const write = client.rememberTurn(turn("c1", "1"));
+  const recall = client.recall({ query: "hello", channelId: "c1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 2);
+  assert.equal((await recall).context, "fresh");
+  releaseWrite();
+  assert.equal((await write).status, "completed");
+});

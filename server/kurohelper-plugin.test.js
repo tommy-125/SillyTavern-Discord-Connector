@@ -26,6 +26,7 @@ test("KuroHelper transport rejects missing auth and answers authenticated health
   const plugin = createKuroHelperPlugin(
     {
       isSillyTavernReady: () => false,
+      getVisionCacheStats: () => ({ hits: 8, misses: 2, hitRate: 0.8 }),
       onUserMessage: async () => false,
       log: () => {},
     },
@@ -62,6 +63,8 @@ test("KuroHelper transport rejects missing auth and answers authenticated health
     assert.equal(response.type, "health_response");
     assert.equal(response.requestId, "health-1");
     assert.equal(response.payload.status, "degraded");
+    assert.equal(response.payload.visionCache.hits, 8);
+    assert.equal(response.payload.visionCache.hitRate, 0.8);
     socket.close();
   } finally {
     await plugin.stop();
@@ -121,6 +124,8 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
           size: 1234,
           messageId: "message-1",
           authorName: "Alice",
+          sourceKind: "recent",
+          sourceMessageText: "  earlier\n image   message  ",
           contextOnly: true,
         }],
       },
@@ -136,6 +141,8 @@ test("KuroHelper transport returns generation metrics with the final reply", asy
       size: 1234,
       messageId: "message-1",
       authorName: "Alice",
+      sourceKind: "recent",
+      sourceMessageText: "earlier image message",
       contextOnly: true,
     }]);
     const responsePromise = waitForMessage(socket);

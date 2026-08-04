@@ -79,12 +79,18 @@ export function injectDiscordPromptHistory(
     .filter(Boolean);
 
   if (injected.length > 0) {
+    injected[0].mes = `[近期脈絡]\n${injected[0].mes}`;
+  }
+
+  if (injected.length > 0) {
     chat.splice(chat.length - 1, 0, ...injected);
   }
   const attachmentContext = String(currentImageContext || '').trim();
-  if (attachmentContext) {
-    currentMessage.mes = `${String(originalCurrentText || '').trim()}\n\n${attachmentContext}`.trim();
-  }
+  currentMessage.mes = [
+    '[本次訊息]',
+    String(originalCurrentText || '').trim(),
+    attachmentContext,
+  ].filter(Boolean).join('\n\n');
 
   let restored = false;
   return () => {

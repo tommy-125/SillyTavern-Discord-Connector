@@ -5,7 +5,10 @@ import {
   cacheRawReply,
   listRawReplyCache,
   RAW_REPLY_CACHE_LIMIT,
+  resetRawReplyCacheForTests,
 } from './raw-reply-cache.mjs';
+
+test.beforeEach(() => resetRawReplyCacheForTests());
 
 test('retains only the five most recent raw replies', () => {
   const chat = [];
@@ -37,6 +40,7 @@ test('stores the original text independently from the formatted message', () => 
     {
       cachedAt: '2026-08-02T00:00:00.000Z',
       rawText: '……（低下頭）嗯。',
+      source: 'generation',
     },
   ]);
   assert.equal(message.mes, '……嗯。');
@@ -49,4 +53,12 @@ test('does not overwrite an existing raw reply with its formatted text', () => {
   assert.equal(cacheRawReply(chat, message, '……（低下頭）嗯。'), true);
   assert.equal(cacheRawReply(chat, message, '……嗯。'), false);
   assert.equal(listRawReplyCache(chat)[0].rawText, '……（低下頭）嗯。');
+});
+
+test('raw replies survive clearing the SillyTavern scratch chat', () => {
+  const message = { is_user: false, mes: 'formatted', extra: {} };
+  const chat = [message];
+  cacheRawReply(chat, message, 'raw');
+  chat.length = 0;
+  assert.equal(listRawReplyCache(chat)[0].rawText, 'raw');
 });

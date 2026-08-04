@@ -1085,6 +1085,15 @@ class MemoryStore:
                 (namespace, identity_key),
             ).fetchone()
 
+        if (
+            existing is not None
+            and scope_type == "global"
+            and str(request_id).isdigit()
+            and str(existing["source_request_id"] or "").isdigit()
+            and int(request_id) < int(existing["source_request_id"])
+        ):
+            return "noop"
+
         now = _iso()
         if existing is not None and existing["normalized_value"] == normalized_value:
             self._db.execute(

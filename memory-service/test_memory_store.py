@@ -157,6 +157,29 @@ class MemoryStoreTests(unittest.TestCase):
         self.assertIn("專案決定改用新供應商。", summaries)
         self.assertNotIn("海獺喜歡巧克力冰棒。", summaries)
 
+    def test_older_global_result_cannot_supersede_newer_memory(self):
+        operation = {
+            "action": "ADD",
+            "scope": "global",
+            "category": "decision",
+            "attribute_key": "project.provider",
+            "summary": "Use the new provider",
+            "participants": [],
+            "importance": 0.9,
+            "confidence": 1.0,
+        }
+        self.store.apply_operations(
+            "Kuro", [operation], request_id="120", channel_id="channel-2"
+        )
+        older = {**operation, "summary": "Use the old provider"}
+        result = self.store.apply_operations(
+            "Kuro", [older], request_id="100", channel_id="channel-1"
+        )
+        memories = self.store.list_memories("Kuro")
+        self.assertEqual(result["noop"], 1)
+        self.assertEqual(len(memories), 1)
+        self.assertEqual(memories[0]["memory_value"], "Use the new provider")
+
     def test_store_rejects_new_legacy_person_profile_categories(self):
         result = self.store.apply_operations(
             "Kuro",

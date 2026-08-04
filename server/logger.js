@@ -14,7 +14,7 @@
 const { config } = require("./config-loader");
 
 /**
- * @param {"log"|"warn"|"error"} level
+ * @param {"log"|"info"|"warn"|"error"} level
  * @param {...any} args
  */
 function log(level, ...args) {
@@ -30,6 +30,9 @@ function log(level, ...args) {
       break;
     case "warn":
       console.warn(`[${timestamp}]`, ...args);
+      break;
+    case "info":
+      console.log(`[${timestamp}]`, ...args);
       break;
     default:
       console.log(`[${timestamp}]`, ...args);

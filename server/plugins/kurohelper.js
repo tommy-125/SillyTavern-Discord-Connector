@@ -59,16 +59,26 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
 
   function normalizeImages(images) {
     if (!Array.isArray(images)) return [];
-    return images.slice(0, 4).map((image) => ({
-      id: String(image?.id || "").slice(0, 100),
-      url: String(image?.url || "").trim().slice(0, 2048),
-      filename: String(image?.filename || "").slice(0, 255),
-      contentType: String(image?.contentType || "").slice(0, 100),
-      size: Math.max(0, Math.min(Number(image?.size) || 0, 10 * 1024 * 1024)),
-      messageId: String(image?.messageId || "").slice(0, 100),
-      authorName: String(image?.authorName || "").slice(0, 100),
-      contextOnly: image?.contextOnly === true,
-    })).filter((image) => image.url);
+    const allowedSourceKinds = new Set(["current", "reply", "recent"]);
+    return images.slice(0, 4).map((image) => {
+      const sourceKind = String(image?.sourceKind || "").trim().toLowerCase();
+      return {
+        id: String(image?.id || "").slice(0, 100),
+        url: String(image?.url || "").trim().slice(0, 2048),
+        filename: String(image?.filename || "").slice(0, 255),
+        contentType: String(image?.contentType || "").slice(0, 100),
+        size: Math.max(0, Math.min(Number(image?.size) || 0, 10 * 1024 * 1024)),
+        messageId: String(image?.messageId || "").slice(0, 100),
+        authorName: String(image?.authorName || "").slice(0, 100),
+        sourceKind: allowedSourceKinds.has(sourceKind) ? sourceKind : "",
+        sourceMessageText: String(image?.sourceMessageText || "")
+          .replace(/[\u0000-\u001f\u007f]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 1500),
+        contextOnly: image?.contextOnly === true,
+      };
+    }).filter((image) => image.url);
   }
 
   function requestFingerprint(channelId, userId, text, images = []) {
@@ -205,6 +215,9 @@ function createKuroHelperPlugin(handlers, pluginConfig = {}) {
         sillyTavernReady: handlers.isSillyTavernReady(),
         memoryEnabled: process.env.MEMORY_ENABLED !== "false",
         trashRetentionDays: Number(process.env.MEMORY_TRASH_RETENTION_DAYS) || 30,
+        visionCache: typeof handlers.getVisionCacheStats === "function"
+          ? handlers.getVisionCacheStats()
+          : null,
       });
       return;
     }

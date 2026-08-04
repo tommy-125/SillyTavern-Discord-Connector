@@ -39,6 +39,11 @@ import {
   setExternalAbortController,
   deleteLastMessage,
   saveChatConditional,
+  clearChat,
+  characters,
+  this_chid,
+  getChat,
+  getCurrentChatId,
   setUserName,
   setExtensionPrompt,
   extension_prompt_types,
@@ -236,6 +241,31 @@ export function captureAndSendIntroMessage(chatId) {
 // handleUserMessage
 // ---------------------------------------------------------------------------
 
+async function ensureWorkerScratchChat() {
+  const workerId = String(sharedState.workerId || '').trim();
+  if (!workerId) return;
+
+  const expectedChatId = `KuroHelper ${workerId}`;
+  if (getCurrentChatId() === expectedChatId) return;
+
+  // Do not use openCharacterChat() here. It persists the selected chat name
+  // into the shared character card, which lets parallel browser workers race
+  // and cross their chat file with another file's integrity slug.
+  await clearChat({ clearData: true });
+  const character = characters[this_chid];
+  if (!character) throw new Error('No active character for worker scratch chat');
+  character.chat = expectedChatId;
+  await getChat();
+
+  const actualChatId = getCurrentChatId();
+  if (actualChatId !== expectedChatId) {
+    throw new Error(
+      `Worker scratch chat mismatch: expected ${expectedChatId}, got ${actualChatId || '(none)'}`,
+    );
+  }
+  console.info(`[Discord Bridge] Restored isolated chat ${expectedChatId}.`);
+}
+
 /**
  * Handles user_message: injects the text into ST, hooks generation lifecycle
  * events to stream tokens to the bridge, and sends the final reply.
@@ -254,6 +284,10 @@ export async function handleUserMessage(data, { abortController = new AbortContr
   sharedState.lastActiveChatId = data.chatId || sharedState.lastActiveChatId;
   sharedState.lastActiveUserLocale = data.userLocale ?? null;
   latencyParts.memoryRecall = Number(data.memoryRecallMs) || 0;
+
+  // A page reload selects the character card's globally stored chat. Restore
+  // this browser worker's local scratch chat before any user text is written.
+  await ensureWorkerScratchChat();
 
   // Resolve per-user locale so error messages reach the user in their language.
   // eslint-disable-next-line no-shadow
@@ -631,6 +665,11 @@ export async function handleUserMessage(data, { abortController = new AbortContr
         dynamicContexts.currentImageContext,
       );
     } else {
+      restoreDiscordPromptHistory = injectDiscordPromptHistory(
+        stContext.chat,
+        [],
+        '',
+      );
       if (dynamicContexts.recentChannelContext) {
         setExtensionPrompt(
           RECENT_CHANNEL_PROMPT_KEY,
@@ -753,11 +792,6 @@ export async function handleUserMessage(data, { abortController = new AbortContr
   } finally {
     restoreDiscordPromptHistory();
     restorePromptHistory();
-    try {
-      await saveChatConditional();
-    } catch (error) {
-      console.warn('[Discord Bridge] Failed to persist cleaned prompt history:', error);
-    }
     setExtensionPrompt(
       REQUEST_CONTEXT_PROMPT_KEY,
       '',
@@ -790,6 +824,17 @@ export async function handleUserMessage(data, { abortController = new AbortContr
       false,
       extension_prompt_roles.SYSTEM,
     );
+    try {
+      await clearChat({ clearData: true });
+      await saveChatConditional();
+    } catch (error) {
+      console.warn('[Discord Bridge] Failed to clear worker scratch chat:', error);
+    }
+    safeSend({
+      type: 'generation_complete',
+      requestId: data.requestId,
+      chatId: messageState.chatId,
+    });
   }
 }
 

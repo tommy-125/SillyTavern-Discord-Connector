@@ -23,6 +23,7 @@ const UI_READY_ATTEMPT_MS = positiveInt(
   20_000,
 );
 const HEALTH_PORT = positiveInt(process.env.BROWSER_HEALTH_PORT, 8082);
+const WORKER_COUNT = Math.min(positiveInt(process.env.ST_WORKER_COUNT, 1), 8);
 const HEALTH_STALE_MS = Math.max(WATCH_INTERVAL_MS * 3, 45_000);
 const UI_READY_ATTEMPTS = 3;
 const SESSION_FAILURE_LIMIT = 3;
@@ -67,18 +68,23 @@ const OPENROUTER_KEY_MARKER = path.join(
 );
 
 let shuttingDown = false;
-let activeContext = null;
+const activeContexts = new Map();
 let openRouterApiKey = "";
 let healthServer = null;
-let consecutiveSessionFailures = 0;
-const healthState = {
-  uiReady: false,
-  providerReady: false,
-  bridgeConnected: false,
-  lastProbeAt: 0,
-  lastError: "starting",
-  sessionStartedAt: 0,
-};
+const consecutiveSessionFailures = new Map();
+const workerHealth = new Map(
+  Array.from({ length: WORKER_COUNT }, (_, index) => [
+    `worker-${index + 1}`,
+    {
+      uiReady: false,
+      providerReady: false,
+      bridgeConnected: false,
+      lastProbeAt: 0,
+      lastError: "starting",
+      sessionStartedAt: 0,
+    },
+  ]),
+);
 
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(value || "", 10);
@@ -94,31 +100,37 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function setHealth(patch) {
-  Object.assign(healthState, patch);
+function setHealth(workerId, patch) {
+  const state = workerHealth.get(workerId);
+  if (state) Object.assign(state, patch);
 }
 
 function healthSnapshot() {
-  const probeAgeMs = healthState.lastProbeAt
-    ? Date.now() - healthState.lastProbeAt
-    : null;
-  const healthy = Boolean(
-    healthState.uiReady &&
-      healthState.providerReady &&
-      healthState.bridgeConnected &&
-      probeAgeMs != null &&
-      probeAgeMs <= HEALTH_STALE_MS,
-  );
+  const workers = [...workerHealth.entries()].map(([id, state]) => {
+    const probeAgeMs = state.lastProbeAt
+      ? Date.now() - state.lastProbeAt
+      : null;
+    const healthy = Boolean(
+      state.uiReady &&
+        state.providerReady &&
+        state.bridgeConnected &&
+        probeAgeMs != null &&
+        probeAgeMs <= HEALTH_STALE_MS,
+    );
+    return { id, ...state, probeAgeMs, healthy };
+  });
+  const healthy = workers.length === WORKER_COUNT && workers.every((worker) => worker.healthy);
   return {
     status: healthy ? "ok" : "unhealthy",
     healthy,
     model: OPENROUTER_MODEL,
-    uiReady: healthState.uiReady,
-    providerReady: healthState.providerReady,
-    bridgeConnected: healthState.bridgeConnected,
-    probeAgeMs,
-    lastError: healthState.lastError || null,
-    sessionStartedAt: healthState.sessionStartedAt || null,
+    configuredWorkers: WORKER_COUNT,
+    readyWorkers: workers.filter((worker) => worker.healthy).length,
+    uiReady: workers.every((worker) => worker.uiReady),
+    providerReady: workers.every((worker) => worker.providerReady),
+    bridgeConnected: workers.every((worker) => worker.bridgeConnected),
+    lastError: workers.find((worker) => worker.lastError)?.lastError || null,
+    workers,
   };
 }
 
@@ -180,7 +192,7 @@ function booleanFlag(value, fallback, name) {
   throw new Error(`${name} must be true or false`);
 }
 
-async function configureOpenRouter(page) {
+async function configureOpenRouter(page, workerId) {
   await page.waitForSelector("#main_api", {
     state: "attached",
     timeout: UI_TIMEOUT_MS,
@@ -190,7 +202,10 @@ async function configureOpenRouter(page) {
     timeout: UI_TIMEOUT_MS,
   });
 
-  const providerSource = OPENROUTER_PROXY_URL ? "custom" : "openrouter";
+  const workerProxyUrl = OPENROUTER_PROXY_URL
+    ? `${OPENROUTER_PROXY_URL.replace(/\/v1\/?$/, "").replace(/\/+$/, "")}/worker/${encodeURIComponent(workerId)}/v1`
+    : "";
+  const providerSource = workerProxyUrl ? "custom" : "openrouter";
   const secretKey = OPENROUTER_PROXY_URL
     ? "api_key_custom"
     : "api_key_openrouter";
@@ -248,7 +263,7 @@ async function configureOpenRouter(page) {
       shouldReplaceSecret: previousKeyHash !== keyHash,
       providerSource,
       secretKey,
-      proxyUrl: OPENROUTER_PROXY_URL,
+      proxyUrl: workerProxyUrl,
       model: OPENROUTER_MODEL,
     },
   );
@@ -365,7 +380,7 @@ async function configureOpenRouter(page) {
 
   log(
     "info",
-    `OpenRouter is ready with model ${OPENROUTER_MODEL}; reasoning ${OPENROUTER_REASONING_EFFORT}; thoughts ${OPENROUTER_SHOW_THOUGHTS ? "on" : "off"}; metrics ${OPENROUTER_PROXY_URL ? "enabled" : "disabled"}`,
+    `OpenRouter is ready with model ${OPENROUTER_MODEL}; reasoning ${OPENROUTER_REASONING_EFFORT}; thoughts ${OPENROUTER_SHOW_THOUGHTS ? "on" : "off"}; metrics ${workerProxyUrl ? `enabled (${workerId})` : "disabled"}`,
   );
 }
 
@@ -395,6 +410,38 @@ async function selectDefaultCharacter(page) {
   }
 
   log("info", `Selected SillyTavern character ${DEFAULT_CHARACTER}`);
+}
+
+async function selectWorkerChat(page, workerId) {
+  if (!DEFAULT_CHARACTER) return;
+  const chatName = `KuroHelper ${workerId}`;
+  const selectedChat = await page.evaluate(async (name) => {
+    const sillyTavern = await import("/script.js");
+    if (sillyTavern.getCurrentChatId() !== name) {
+      // openCharacterChat() persists characters[this_chid].chat back into the
+      // shared character card. Multiple browser workers calling it at once can
+      // therefore replace one another's target chat while retaining a different
+      // chat's integrity slug. Keep the worker chat selection page-local.
+      await sillyTavern.clearChat({ clearData: true });
+      const character = sillyTavern.characters[sillyTavern.this_chid];
+      if (!character) throw new Error("No active character for worker chat");
+      character.chat = name;
+      await sillyTavern.getChat();
+    }
+    return sillyTavern.getCurrentChatId();
+  }, chatName);
+  if (selectedChat !== chatName) {
+    throw new Error(
+      `${workerId} selected unexpected chat ${selectedChat || "(none)"}`,
+    );
+  }
+  log("info", `${workerId} selected isolated chat ${chatName}`);
+}
+
+function bridgeUrlForWorker(workerId) {
+  const url = new URL(BRIDGE_URL);
+  url.searchParams.set("workerId", workerId);
+  return url.toString();
 }
 
 async function completeOnboarding(page, timeout = UI_TIMEOUT_MS) {
@@ -437,14 +484,14 @@ async function providerIsConnected(page) {
   );
 }
 
-async function connectExtension(page) {
+async function connectExtension(page, bridgeUrl) {
   await page.waitForSelector("#discord_bridge_url", {
     state: "attached",
     timeout: UI_TIMEOUT_MS,
   });
 
   if (await connectorIsConnected(page)) {
-    log("info", `Connector is connected to ${BRIDGE_URL}`);
+    log("info", `Connector is connected to ${bridgeUrl}`);
     return;
   }
 
@@ -465,7 +512,7 @@ async function connectExtension(page) {
     { timeout: UI_TIMEOUT_MS },
   );
 
-  log("info", `Connector is connected to ${BRIDGE_URL}`);
+  log("info", `Connector is connected to ${bridgeUrl}`);
 }
 
 async function capturePromptSnapshot(page) {
@@ -616,8 +663,8 @@ async function capturePromptSnapshot(page) {
   log("info", `Captured dry-run prompt snapshot at ${PROMPT_SNAPSHOT_PATH}`);
 }
 
-async function openSillyTavern(page) {
-  setHealth({
+async function openSillyTavern(page, workerId, bridgeUrl) {
+  setHealth(workerId, {
     uiReady: false,
     providerReady: false,
     bridgeConnected: false,
@@ -643,12 +690,12 @@ async function openSillyTavern(page) {
         state: "attached",
         timeout: UI_READY_ATTEMPT_MS,
       });
-      setHealth({ uiReady: true, lastError: "" });
+      setHealth(workerId, { uiReady: true, lastError: "" });
       uiError = null;
       break;
     } catch (error) {
       uiError = error;
-      setHealth({ lastError: `UI readiness failed: ${error.message}` });
+      setHealth(workerId, { lastError: `UI readiness failed: ${error.message}` });
       log(
         "warn",
         `SillyTavern UI attempt ${attempt}/${UI_READY_ATTEMPTS} failed: ${error.message}`,
@@ -670,23 +717,24 @@ async function openSillyTavern(page) {
   }
 
   try {
-    await configureOpenRouter(page);
-    setHealth({ providerReady: true });
+    await configureOpenRouter(page, workerId);
+    setHealth(workerId, { providerReady: true });
     await selectDefaultCharacter(page);
-    await connectExtension(page);
-    setHealth({
+    await selectWorkerChat(page, workerId);
+    await connectExtension(page, bridgeUrl);
+    setHealth(workerId, {
       bridgeConnected: true,
       lastProbeAt: Date.now(),
       lastError: "",
     });
-    await capturePromptSnapshot(page);
+    if (workerId === "worker-1") await capturePromptSnapshot(page);
   } catch (error) {
-    setHealth({ lastError: error.message });
+    setHealth(workerId, { lastError: error.message });
     throw error;
   }
 }
 
-async function runBrowserSession() {
+async function runBrowserSession(workerId) {
   const launchOptions = {
     headless: true,
   };
@@ -698,11 +746,11 @@ async function runBrowserSession() {
     };
   }
 
-  const context = await chromium.launchPersistentContext(
-    PROFILE_DIR,
-    launchOptions,
-  );
-  activeContext = context;
+  const profileDirectory =
+    WORKER_COUNT === 1 ? PROFILE_DIR : path.join(PROFILE_DIR, workerId);
+  const bridgeUrl = bridgeUrlForWorker(workerId);
+  const context = await chromium.launchPersistentContext(profileDirectory, launchOptions);
+  activeContexts.set(workerId, context);
 
   await context.addInitScript((config) => {
     try {
@@ -721,7 +769,8 @@ async function runBrowserSession() {
       },
     );
   }, {
-    bridgeUrl: BRIDGE_URL,
+    bridgeUrl,
+    workerId,
     autoConnect: true,
     uiLanguage: UI_LANGUAGE,
   });
@@ -734,9 +783,9 @@ async function runBrowserSession() {
   );
   page.on("crash", () => log("error", "Chromium page crashed"));
 
-  setHealth({ sessionStartedAt: Date.now(), lastError: "starting session" });
-  await openSillyTavern(page);
-  consecutiveSessionFailures = 0;
+  setHealth(workerId, { sessionStartedAt: Date.now(), lastError: "starting session" });
+  await openSillyTavern(page, workerId, bridgeUrl);
+  consecutiveSessionFailures.set(workerId, 0);
 
   while (!shuttingDown) {
     await delay(WATCH_INTERVAL_MS);
@@ -745,7 +794,7 @@ async function runBrowserSession() {
     try {
       let providerReady = await providerIsConnected(page);
       let bridgeConnected = await connectorIsConnected(page);
-      setHealth({
+      setHealth(workerId, {
         providerReady,
         bridgeConnected,
         lastProbeAt: Date.now(),
@@ -753,16 +802,16 @@ async function runBrowserSession() {
 
       if (!providerReady) {
         log("warn", "AI provider disconnected; attempting to reconnect");
-        await configureOpenRouter(page);
+        await configureOpenRouter(page, workerId);
         providerReady = true;
       }
       if (!bridgeConnected) {
         log("warn", "Connector disconnected; attempting to reconnect");
-        await connectExtension(page);
+        await connectExtension(page, bridgeUrl);
         bridgeConnected = true;
       }
 
-      setHealth({
+      setHealth(workerId, {
         uiReady: true,
         providerReady,
         bridgeConnected,
@@ -770,13 +819,50 @@ async function runBrowserSession() {
         lastError: "",
       });
     } catch (error) {
-      setHealth({
+      setHealth(workerId, {
         providerReady: false,
         bridgeConnected: false,
         lastError: `Readiness probe failed: ${error.message}`,
       });
       log("warn", `Readiness probe failed: ${error.message}; reloading page`);
-      await openSillyTavern(page);
+      await openSillyTavern(page, workerId, bridgeUrl);
+    }
+  }
+}
+
+async function superviseWorker(workerId) {
+  while (!shuttingDown) {
+    try {
+      await runBrowserSession(workerId);
+    } catch (error) {
+      if (!shuttingDown) {
+        const failures = (consecutiveSessionFailures.get(workerId) || 0) + 1;
+        consecutiveSessionFailures.set(workerId, failures);
+        setHealth(workerId, {
+          uiReady: false,
+          providerReady: false,
+          bridgeConnected: false,
+          lastProbeAt: 0,
+          lastError: error.message,
+        });
+        log("error", `[${workerId}] ${error.stack || error.message}`);
+      }
+    } finally {
+      const context = activeContexts.get(workerId);
+      if (context) {
+        await context.close().catch(() => {});
+        activeContexts.delete(workerId);
+      }
+    }
+
+    if (!shuttingDown) {
+      if ((consecutiveSessionFailures.get(workerId) || 0) >= SESSION_FAILURE_LIMIT) {
+        throw new Error(
+          `${workerId} failed ${SESSION_FAILURE_LIMIT} consecutive times`,
+        );
+      }
+      log("info", `[${workerId}] Restarting browser session in 5 seconds`);
+      await delay(5_000);
     }
   }
 }
@@ -784,54 +870,22 @@ async function runBrowserSession() {
 async function main() {
   await loadConfiguration();
   healthServer = startHealthServer();
-  log("info", "Starting persistent headless Chromium session");
-
-  while (!shuttingDown) {
-    try {
-      await runBrowserSession();
-    } catch (error) {
-      if (!shuttingDown) {
-        consecutiveSessionFailures += 1;
-        setHealth({
-          uiReady: false,
-          providerReady: false,
-          bridgeConnected: false,
-          lastProbeAt: 0,
-          lastError: error.message,
-        });
-        log("error", `${error.stack || error.message}`);
-      }
-    } finally {
-      if (activeContext) {
-        await activeContext.close().catch(() => {});
-        activeContext = null;
-      }
-    }
-
-    if (!shuttingDown) {
-      if (consecutiveSessionFailures >= SESSION_FAILURE_LIMIT) {
-        log(
-          "error",
-          `Browser session failed ${SESSION_FAILURE_LIMIT} consecutive times; exiting for container restart`,
-        );
-        if (healthServer) {
-          await new Promise((resolve) => healthServer.close(resolve));
-          healthServer = null;
-        }
-        process.exitCode = 1;
-        return;
-      }
-      log("info", "Restarting browser session in 5 seconds");
-      await delay(5_000);
-    }
-  }
+  log("info", `Starting ${WORKER_COUNT} isolated headless SillyTavern worker(s)`);
+  await Promise.all(
+    Array.from({ length: WORKER_COUNT }, (_, index) =>
+      superviseWorker(`worker-${index + 1}`),
+    ),
+  );
 }
 
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log("info", `Received ${signal}; shutting down`);
-  if (activeContext) await activeContext.close().catch(() => {});
+  await Promise.all(
+    [...activeContexts.values()].map((context) => context.close().catch(() => {})),
+  );
+  activeContexts.clear();
   if (healthServer) {
     await new Promise((resolve) => healthServer.close(resolve));
     healthServer = null;
@@ -841,7 +895,8 @@ async function shutdown(signal) {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-main().catch((error) => {
+main().catch(async (error) => {
   log("error", error.stack || error.message);
   process.exitCode = 1;
+  await shutdown("fatal worker failure");
 });

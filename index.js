@@ -156,6 +156,10 @@ function connect() {
       if (data.type === "heartbeat") return;
 
       if (data.type === "bridge_config") {
+        sharedState.workerId =
+          typeof data.workerId === "string" && data.workerId.trim()
+            ? data.workerId.trim()
+            : null;
         // Validate timezone and locale before storing - invalid values would
         // cause Intl.DateTimeFormat to throw at autocomplete time.
         if (data.timezone) {
@@ -233,6 +237,7 @@ function connect() {
         const personaName = personaId ? pSettings?.personas?.[personaId] : null;
         safeSend({
           type: "client_info",
+          ...(runtimeConfig.workerId ? { workerId: runtimeConfig.workerId } : {}),
           ...(personaName ? { personaName } : {}),
           crossPlatformRelay: getSettings().crossPlatformRelay,
         });
@@ -269,6 +274,11 @@ function connect() {
                 chatId: data.chatId,
                 text: '生成逾時，SillyTavern 正在自動恢復，請稍後再試。',
                 metrics: { status: 'timeout' },
+              });
+              safeSend({
+                type: 'worker_draining',
+                requestId: data.requestId,
+                chatId: data.chatId,
               });
               window.location.reload();
             },
