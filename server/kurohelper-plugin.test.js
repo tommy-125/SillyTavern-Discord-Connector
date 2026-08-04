@@ -321,3 +321,81 @@ test("KuroHelper transport reattaches in-flight duplicates and replays completed
     await plugin.stop();
   }
 });
+
+test("simultaneous channels keep replied-image metadata isolated", async () => {
+  const port = await reservePort();
+  const received = new Map();
+  let resolveDispatched;
+  const dispatched = new Promise((resolve) => {
+    resolveDispatched = resolve;
+  });
+  const plugin = createKuroHelperPlugin(
+    {
+      isSillyTavernReady: () => true,
+      onUserMessage: async (_platform, channelId, _text, _userId, metadata) => {
+        received.set(channelId, metadata.images);
+        if (received.size === 2) resolveDispatched();
+        return true;
+      },
+      log: () => {},
+    },
+    { host: "127.0.0.1", port, secret: "test-secret" },
+  );
+  await plugin.start();
+
+  try {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, {
+      headers: { Authorization: "Bearer test-secret" },
+    });
+    await new Promise((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    for (const suffix of ["a", "b"]) {
+      socket.send(JSON.stringify({
+        version: 1,
+        type: "generate_request",
+        requestId: `request-${suffix}`,
+        payload: {
+          channelId: `channel-${suffix}`,
+          userId: `user-${suffix}`,
+          text: `question-${suffix}`,
+          images: [{
+            id: `reply-image-${suffix}`,
+            url: `https://cdn.discordapp.com/attachments/a/b/reply-${suffix}.png`,
+            messageId: `reply-message-${suffix}`,
+            authorName: `author-${suffix}`,
+            sourceKind: "reply",
+            sourceMessageText: `source-question-${suffix}`,
+          }],
+        },
+      }));
+    }
+    await dispatched;
+
+    for (const suffix of ["a", "b"]) {
+      assert.deepEqual(received.get(`channel-${suffix}`), [{
+        id: `reply-image-${suffix}`,
+        url: `https://cdn.discordapp.com/attachments/a/b/reply-${suffix}.png`,
+        filename: "",
+        contentType: "",
+        size: 0,
+        messageId: `reply-message-${suffix}`,
+        authorName: `author-${suffix}`,
+        sourceKind: "reply",
+        sourceMessageText: `source-question-${suffix}`,
+        contextOnly: false,
+      }]);
+    }
+
+    await plugin.sendText("channel-a", "reply-a", {
+      kind: "ai_reply", requestId: "request-a", final: true,
+    });
+    await plugin.sendText("channel-b", "reply-b", {
+      kind: "ai_reply", requestId: "request-b", final: true,
+    });
+    socket.close();
+  } finally {
+    await plugin.stop();
+  }
+});

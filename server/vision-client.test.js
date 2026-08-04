@@ -257,12 +257,16 @@ test("vision client caches the same question but re-evaluates a different questi
 
 test("recent image observation is keyed by its source message instead of each new trigger", async () => {
   let requests = 0;
+  const requestedFields = [];
   const client = createVisionClient({
     enabled: true,
     apiKey: "test-key",
     cacheTtlSeconds: 60,
-    fetch: async () => {
+    fetch: async (_url, options) => {
       requests += 1;
+      requestedFields.push(Object.keys(
+        JSON.parse(options.body).response_format.json_schema.schema.properties,
+      ));
       return new Response(JSON.stringify({
         model: "google/gemini-2.5-flash-lite",
         choices: [{ message: { content: structuredContent("來源訊息相關觀察") } }],
@@ -280,9 +284,50 @@ test("recent image observation is keyed by its source message instead of each ne
   const first = await client.describe(images, "小黑，接續前面的話");
   const second = await client.describe(images, "小黑，換一個完全不同的問題");
 
-  assert.equal(requests, 1);
+  const editedImages = [{
+    ...images[0],
+    sourceMessageText: "編輯後改成詢問圖片中的錯誤代碼",
+  }];
+  const afterEdit = await client.describe(editedImages, "小黑，接續前面的話");
+
+  assert.equal(requests, 2);
   assert.equal(first.cacheHit, false);
   assert.equal(second.cacheHit, true);
+  assert.equal(afterEdit.cacheHit, false);
+  assert.deepEqual(requestedFields, [
+    ["ocr", "observation"],
+    ["observation"],
+  ]);
+  assert.deepEqual(afterEdit.cacheParts, [{ ocr: true, observation: false }]);
+});
+
+test("expired Discord image URLs fail safely and are not cached", async () => {
+  let requests = 0;
+  const client = createVisionClient({
+    enabled: true,
+    apiKey: "test-key",
+    providerRoutes: ["google-ai-studio"],
+    fetch: async () => {
+      requests += 1;
+      return new Response(JSON.stringify({
+        error: { message: "Could not fetch image: URL has expired", code: 400 },
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    },
+  });
+  const images = [{
+    id: "expired-attachment",
+    url: "https://cdn.discordapp.com/attachments/1/2/expired.png?ex=expired",
+  }];
+
+  const first = await client.describe(images, "這張圖片是什麼？");
+  const second = await client.describe(images, "這張圖片是什麼？");
+
+  assert.match(first.error, /expired/i);
+  assert.match(second.error, /expired/i);
+  assert.equal(first.context, "");
+  assert.equal(second.context, "");
+  assert.equal(requests, 2);
+  assert.equal(client.getCacheStats().entries, 0);
 });
 
 test("vision cache remains valid for 23 hours and expires after 24 hours", async () => {
